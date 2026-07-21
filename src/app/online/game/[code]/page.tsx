@@ -13,6 +13,7 @@ import {
 import {
   ONLINE_BOARD_SPACES,
   isOnlinePropertySpace,
+  isOnlineTaxSpace,
   onlineSpaceStyles,
   type OnlinePropertySpace,
 } from "@/lib/online-board";
@@ -104,6 +105,7 @@ export default function OnlineGamePage() {
   const hasPendingPropertyPurchase =
     gameState?.pendingPropertyPurchasePosition !== null &&
     gameState?.pendingPropertyPurchasePosition !== undefined;
+  const isDetentionTurn = gameState?.isDetentionTurn === true;
   const localPlayer = gameState?.players.find((player) => {
     return player.userId === currentUserId;
   });
@@ -112,18 +114,26 @@ export default function OnlineGamePage() {
   const canRoll =
     Boolean(room && gameRow && isCurrentPlayer) &&
     !gameState?.hasRolledThisTurn &&
+    !isDetentionTurn &&
     !hasPendingPropertyPurchase &&
     !isActing;
   const canEndTurn =
     Boolean(room && gameRow && isCurrentPlayer) &&
     Boolean(gameState?.hasRolledThisTurn) &&
+    !isDetentionTurn &&
     !hasPendingPropertyPurchase &&
+    !isActing;
+  const canLeaveDetention =
+    Boolean(room && gameRow && isCurrentPlayer && currentPlayer) &&
+    isDetentionTurn &&
+    currentPlayer!.isDetained &&
     !isActing;
   const canBuyProperty =
     Boolean(room && gameRow && isCurrentPlayer && currentPlayer) &&
     hasPendingPropertyPurchase &&
     currentProperty !== null &&
     currentPropertyOwner === null &&
+    !isDetentionTurn &&
     currentPlayer!.position === gameState?.pendingPropertyPurchasePosition &&
     currentPlayer!.balance >= currentProperty.price &&
     !isActing;
@@ -132,6 +142,7 @@ export default function OnlineGamePage() {
     hasPendingPropertyPurchase &&
     currentProperty !== null &&
     currentPropertyOwner === null &&
+    !isDetentionTurn &&
     currentPlayer!.position === gameState?.pendingPropertyPurchasePosition &&
     !isActing;
 
@@ -363,6 +374,41 @@ export default function OnlineGamePage() {
     }
   }
 
+  async function leaveDetention() {
+    if (!supabase || !room || !gameRow || !canLeaveDetention) {
+      return;
+    }
+
+    setIsActing(true);
+    setErrorMessage("");
+
+    try {
+      const { data, error } = await supabase.rpc("leave_online_detention", {
+        expected_version: gameRow.version,
+        target_room_id: room.id,
+      });
+
+      if (error) {
+        throw error;
+      }
+
+      const parsedGameState = parseOnlineGameStateRow(data);
+
+      if (!parsedGameState) {
+        throw new Error(
+          "Online game state is invalid after leaving detention.",
+        );
+      }
+
+      setGameRow(parsedGameState);
+    } catch (error) {
+      setErrorMessage(getSafeSupabaseErrorMessage(error));
+      await loadGameState(room.id).catch(() => undefined);
+    } finally {
+      setIsActing(false);
+    }
+  }
+
   async function buyProperty() {
     if (
       !supabase ||
@@ -563,11 +609,18 @@ export default function OnlineGamePage() {
             </p>
           ) : null}
         </div>
-        {isActive ? (
-          <span className="border-2 border-[#171915] bg-white px-2 py-1 text-[0.62rem] font-black uppercase">
-            Current
-          </span>
-        ) : null}
+        <div className="flex shrink-0 flex-col items-end gap-1">
+          {isActive ? (
+            <span className="border-2 border-[#171915] bg-white px-2 py-1 text-[0.62rem] font-black uppercase">
+              Current
+            </span>
+          ) : null}
+          {player.isDetained ? (
+            <span className="border-2 border-[#171915] bg-[#ffedf2] px-2 py-1 text-[0.62rem] font-black uppercase">
+              Detained
+            </span>
+          ) : null}
+        </div>
       </div>
     );
   }
@@ -679,6 +732,10 @@ export default function OnlineGamePage() {
                             Rent {formatCurrency(space.rent)}
                           </span>
                         </div>
+                      ) : isOnlineTaxSpace(space) ? (
+                        <div className="mt-1 text-[0.55rem] font-black leading-tight text-[#445045] sm:text-[0.62rem]">
+                          Pay {formatCurrency(space.taxAmount)}
+                        </div>
                       ) : null}
 
                       {playersOnSpace.length > 0 ? (
@@ -753,9 +810,41 @@ export default function OnlineGamePage() {
             </p>
           </div>
 
-          {gameState?.hasRolledThisTurn && currentProperty
+          {gameState?.hasRolledThisTurn &&
+          currentProperty &&
+          !gameState.lastEventCard
             ? renderPropertyPanel(currentProperty)
             : null}
+
+          {gameState?.lastEventCard ? (
+            <div className="border-2 border-[#171915] bg-white/90 p-4 shadow-[8px_8px_0_0_#f8961e] backdrop-blur">
+              <h2 className="text-2xl font-black">Event</h2>
+
+              <div className="mt-4 space-y-3 border-2 border-[#171915] bg-[#fff1de] p-3">
+                <div>
+                  <p className="text-sm font-black uppercase text-[#596057]">
+                    Card
+                  </p>
+                  <p className="break-words text-xl font-black">
+                    {gameState.lastEventCard.title}
+                  </p>
+                </div>
+
+                <p className="border-2 border-[#171915] bg-white p-3 text-sm font-bold leading-6 text-[#445045]">
+                  {gameState.lastEventCard.description}
+                </p>
+
+                <div>
+                  <p className="text-xs font-black uppercase text-[#596057]">
+                    Result
+                  </p>
+                  <p className="mt-1 border-2 border-[#171915] bg-white p-3 text-sm font-bold leading-6 text-[#445045]">
+                    {gameState.lastEventCard.result}
+                  </p>
+                </div>
+              </div>
+            </div>
+          ) : null}
 
           <div className="border-2 border-[#171915] bg-white/90 p-4 shadow-[8px_8px_0_0_#118ab2] backdrop-blur">
             <h2 className="text-2xl font-black">Turn</h2>
@@ -779,15 +868,19 @@ export default function OnlineGamePage() {
               </div>
               <p className="text-sm font-bold leading-6 text-[#445045]">
                 {isCurrentPlayer
-                  ? hasPendingPropertyPurchase
-                    ? "Buy or skip the property before ending your turn."
-                    : gameState?.hasRolledThisTurn
-                      ? "End your turn when ready."
-                      : "Your turn to roll."
+                  ? isDetentionTurn
+                    ? "Leave Civic Detention to miss this turn."
+                    : hasPendingPropertyPurchase
+                      ? "Buy or skip the property before ending your turn."
+                      : gameState?.hasRolledThisTurn
+                        ? "End your turn when ready."
+                        : "Your turn to roll."
                   : currentPlayer
-                    ? hasPendingPropertyPurchase
-                      ? `Waiting for ${currentPlayer.name} to decide on a property.`
-                      : `Waiting for ${currentPlayer.name}.`
+                    ? isDetentionTurn
+                      ? `Waiting for ${currentPlayer.name} to leave Civic Detention.`
+                      : hasPendingPropertyPurchase
+                        ? `Waiting for ${currentPlayer.name} to decide on a property.`
+                        : `Waiting for ${currentPlayer.name}.`
                     : "Waiting for game state."}
               </p>
             </div>
@@ -815,6 +908,17 @@ export default function OnlineGamePage() {
                 ? "Ending..."
                 : "End Turn"}
             </button>
+
+            {isDetentionTurn ? (
+              <button
+                className="h-14 border-2 border-[#171915] bg-[#f9c74f] px-6 text-base font-bold text-[#171915] shadow-[8px_8px_0_0_#171915] transition-transform hover:-translate-y-0.5 focus:outline-none focus:ring-4 focus:ring-[#f9c74f]/45 disabled:cursor-not-allowed disabled:bg-[#c6cbbf] disabled:text-[#596057] disabled:opacity-70 disabled:shadow-none"
+                disabled={!canLeaveDetention}
+                onClick={leaveDetention}
+                type="button"
+              >
+                {isActing ? "Leaving..." : "Leave Detention"}
+              </button>
+            ) : null}
 
             <Link
               className="flex h-14 items-center justify-center border-2 border-[#171915] bg-[#ef476f] px-6 text-base font-bold text-white shadow-[8px_8px_0_0_#171915] transition-transform hover:-translate-y-0.5 focus:outline-none focus:ring-4 focus:ring-[#ef476f]/35"

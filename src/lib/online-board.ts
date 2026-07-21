@@ -11,13 +11,14 @@ export type OnlineBoardSpace = {
   name: string;
   price?: number;
   rent?: number;
+  taxAmount?: number;
   type: OnlineSpaceType;
 };
 
 export const ONLINE_BOARD_SPACES: OnlineBoardSpace[] = [
   { name: "Grand Plaza", type: "start" },
   { name: "CoLab Court", type: "property", price: 120, rent: 12 },
-  { name: "City Tax", type: "tax" },
+  { name: "City Tax", type: "tax", taxAmount: 150 },
   { name: "Pixel Row", type: "property", price: 140, rent: 14 },
   { name: "Metro Loop", type: "transit" },
   { name: "Pop-Up Market", type: "event" },
@@ -29,7 +30,7 @@ export const ONLINE_BOARD_SPACES: OnlineBoardSpace[] = [
   { name: "Glass Tower", type: "property", price: 260, rent: 26 },
   { name: "Civic Detention", type: "detention" },
   { name: "Greenway Flats", type: "property", price: 240, rent: 24 },
-  { name: "Grid Levy", type: "tax" },
+  { name: "Grid Levy", type: "tax", taxAmount: 100 },
   { name: "Central Rail", type: "transit" },
   { name: "Neon Arcade", type: "property", price: 280, rent: 28 },
   { name: "City Vote", type: "event" },
@@ -55,6 +56,17 @@ export function isOnlinePropertySpace(
     typeof space.price === "number" &&
     typeof space.rent === "number"
   );
+}
+
+export type OnlineTaxSpace = OnlineBoardSpace & {
+  taxAmount: number;
+  type: "tax";
+};
+
+export function isOnlineTaxSpace(
+  space: OnlineBoardSpace,
+): space is OnlineTaxSpace {
+  return space.type === "tax" && typeof space.taxAmount === "number";
 }
 
 export const onlineSpaceStyles: Record<

@@ -14,6 +14,7 @@ export type OnlineGamePlayer = {
   name: string;
   color: string;
   balance: number;
+  isDetained: boolean;
   position: number;
 };
 
@@ -23,12 +24,20 @@ export type OnlineDiceRoll = {
   total: number;
 };
 
+export type OnlineResolvedEventCard = {
+  title: string;
+  description: string;
+  result: string;
+};
+
 export type OnlinePropertyOwners = Record<string, string>;
 
 export type OnlineGameState = {
   boardSpaceCount: number;
   currentPlayerIndex: number;
   hasRolledThisTurn: boolean;
+  isDetentionTurn: boolean;
+  lastEventCard: OnlineResolvedEventCard | null;
   lastRoll: OnlineDiceRoll | null;
   message: string;
   pendingPropertyPurchasePosition: number | null;
@@ -83,12 +92,16 @@ function parseOnlineGameState(state: unknown): OnlineGameState | null {
     return null;
   }
 
+  const isDetentionTurn =
+    state.isDetentionTurn === undefined ? false : state.isDetentionTurn;
+
   if (
     state.phase !== "online_game" ||
     state.boardSpaceCount !== BOARD_SPACE_COUNT ||
     typeof state.currentPlayerIndex !== "number" ||
     !Number.isInteger(state.currentPlayerIndex) ||
     typeof state.hasRolledThisTurn !== "boolean" ||
+    typeof isDetentionTurn !== "boolean" ||
     typeof state.message !== "string" ||
     !Array.isArray(state.players)
   ) {
@@ -117,6 +130,7 @@ function parseOnlineGameState(state: unknown): OnlineGameState | null {
   }
 
   const lastRoll = parseOnlineDiceRoll(state.lastRoll);
+  const lastEventCard = parseOnlineResolvedEventCard(state.lastEventCard);
   const propertyOwners = parseOnlinePropertyOwners(
     state.propertyOwners,
     players,
@@ -128,8 +142,20 @@ function parseOnlineGameState(state: unknown): OnlineGameState | null {
 
   if (
     lastRoll === undefined ||
+    lastEventCard === undefined ||
     !propertyOwners ||
     pendingPropertyPurchasePosition === undefined
+  ) {
+    return null;
+  }
+
+  const currentPlayer = players[state.currentPlayerIndex];
+
+  if (
+    isDetentionTurn &&
+    (!currentPlayer.isDetained ||
+      state.hasRolledThisTurn ||
+      pendingPropertyPurchasePosition !== null)
   ) {
     return null;
   }
@@ -138,6 +164,8 @@ function parseOnlineGameState(state: unknown): OnlineGameState | null {
     boardSpaceCount: BOARD_SPACE_COUNT,
     currentPlayerIndex: state.currentPlayerIndex,
     hasRolledThisTurn: state.hasRolledThisTurn,
+    isDetentionTurn,
+    lastEventCard,
     lastRoll,
     message: state.message,
     pendingPropertyPurchasePosition,
@@ -158,6 +186,8 @@ function parseOnlineGamePlayer(player: unknown): OnlineGamePlayer | null {
     typeof player.name !== "string" ||
     player.name.trim().length === 0 ||
     typeof player.color !== "string" ||
+    (player.isDetained !== undefined &&
+      typeof player.isDetained !== "boolean") ||
     typeof player.balance !== "number" ||
     !Number.isFinite(player.balance) ||
     typeof player.position !== "number" ||
@@ -172,6 +202,7 @@ function parseOnlineGamePlayer(player: unknown): OnlineGamePlayer | null {
     balance: player.balance,
     color: player.color,
     id: player.id,
+    isDetained: player.isDetained === true,
     name: player.name.trim(),
     position: player.position,
     userId: player.userId,
@@ -207,6 +238,33 @@ function parseOnlineDiceRoll(roll: unknown) {
     dieOne: roll.dieOne,
     dieTwo: roll.dieTwo,
     total: roll.total,
+  };
+}
+
+function parseOnlineResolvedEventCard(eventCard: unknown) {
+  if (eventCard === undefined || eventCard === null) {
+    return null;
+  }
+
+  if (!isRecord(eventCard)) {
+    return undefined;
+  }
+
+  if (
+    typeof eventCard.title !== "string" ||
+    typeof eventCard.description !== "string" ||
+    typeof eventCard.result !== "string" ||
+    eventCard.title.trim().length === 0 ||
+    eventCard.description.trim().length === 0 ||
+    eventCard.result.trim().length === 0
+  ) {
+    return undefined;
+  }
+
+  return {
+    description: eventCard.description,
+    result: eventCard.result,
+    title: eventCard.title,
   };
 }
 
