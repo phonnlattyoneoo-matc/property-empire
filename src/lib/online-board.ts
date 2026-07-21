@@ -9,35 +9,53 @@ export type OnlineSpaceType =
 
 export type OnlineBoardSpace = {
   name: string;
+  price?: number;
+  rent?: number;
   type: OnlineSpaceType;
 };
 
 export const ONLINE_BOARD_SPACES: OnlineBoardSpace[] = [
   { name: "Grand Plaza", type: "start" },
-  { name: "CoLab Court", type: "property" },
+  { name: "CoLab Court", type: "property", price: 120, rent: 12 },
   { name: "City Tax", type: "tax" },
-  { name: "Pixel Row", type: "property" },
+  { name: "Pixel Row", type: "property", price: 140, rent: 14 },
   { name: "Metro Loop", type: "transit" },
   { name: "Pop-Up Market", type: "event" },
-  { name: "Skyline Lofts", type: "property" },
-  { name: "Canal Walk", type: "property" },
-  { name: "Maker Lane", type: "property" },
+  { name: "Skyline Lofts", type: "property", price: 180, rent: 18 },
+  { name: "Canal Walk", type: "property", price: 200, rent: 20 },
+  { name: "Maker Lane", type: "property", price: 220, rent: 22 },
   { name: "Harbor Line", type: "transit" },
   { name: "Street Fest", type: "event" },
-  { name: "Glass Tower", type: "property" },
+  { name: "Glass Tower", type: "property", price: 260, rent: 26 },
   { name: "Civic Detention", type: "detention" },
-  { name: "Greenway Flats", type: "property" },
+  { name: "Greenway Flats", type: "property", price: 240, rent: 24 },
   { name: "Grid Levy", type: "tax" },
   { name: "Central Rail", type: "transit" },
-  { name: "Neon Arcade", type: "property" },
+  { name: "Neon Arcade", type: "property", price: 280, rent: 28 },
   { name: "City Vote", type: "event" },
   { name: "Rooftop Rest", type: "rest" },
-  { name: "Market Hall", type: "property" },
-  { name: "Riverfront", type: "property" },
+  { name: "Market Hall", type: "property", price: 320, rent: 32 },
+  { name: "Riverfront", type: "property", price: 360, rent: 36 },
   { name: "Bike Hub", type: "transit" },
   { name: "Night Market", type: "event" },
-  { name: "Depot Flats", type: "property" },
+  { name: "Depot Flats", type: "property", price: 300, rent: 30 },
 ];
+
+export type OnlinePropertySpace = OnlineBoardSpace & {
+  price: number;
+  rent: number;
+  type: "property";
+};
+
+export function isOnlinePropertySpace(
+  space: OnlineBoardSpace,
+): space is OnlinePropertySpace {
+  return (
+    space.type === "property" &&
+    typeof space.price === "number" &&
+    typeof space.rent === "number"
+  );
+}
 
 export const onlineSpaceStyles: Record<
   OnlineSpaceType,

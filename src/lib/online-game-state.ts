@@ -3,6 +3,10 @@ import {
   MAX_PLAYERS,
   MIN_PLAYERS,
 } from "@/lib/game-state";
+import {
+  ONLINE_BOARD_SPACES,
+  isOnlinePropertySpace,
+} from "@/lib/online-board";
 
 export type OnlineGamePlayer = {
   id: string;
@@ -19,14 +23,18 @@ export type OnlineDiceRoll = {
   total: number;
 };
 
+export type OnlinePropertyOwners = Record<string, string>;
+
 export type OnlineGameState = {
   boardSpaceCount: number;
   currentPlayerIndex: number;
   hasRolledThisTurn: boolean;
   lastRoll: OnlineDiceRoll | null;
   message: string;
+  pendingPropertyPurchasePosition: number | null;
   phase: "online_game";
   players: OnlineGamePlayer[];
+  propertyOwners: OnlinePropertyOwners;
 };
 
 export type OnlineGameStateRow = {
@@ -109,8 +117,20 @@ function parseOnlineGameState(state: unknown): OnlineGameState | null {
   }
 
   const lastRoll = parseOnlineDiceRoll(state.lastRoll);
+  const propertyOwners = parseOnlinePropertyOwners(
+    state.propertyOwners,
+    players,
+  );
+  const pendingPropertyPurchasePosition =
+    parsePendingPropertyPurchasePosition(
+      state.pendingPropertyPurchasePosition,
+    );
 
-  if (lastRoll === undefined) {
+  if (
+    lastRoll === undefined ||
+    !propertyOwners ||
+    pendingPropertyPurchasePosition === undefined
+  ) {
     return null;
   }
 
@@ -120,8 +140,10 @@ function parseOnlineGameState(state: unknown): OnlineGameState | null {
     hasRolledThisTurn: state.hasRolledThisTurn,
     lastRoll,
     message: state.message,
+    pendingPropertyPurchasePosition,
     phase: "online_game",
     players,
+    propertyOwners,
   };
 }
 
@@ -186,6 +208,61 @@ function parseOnlineDiceRoll(roll: unknown) {
     dieTwo: roll.dieTwo,
     total: roll.total,
   };
+}
+
+function parseOnlinePropertyOwners(
+  propertyOwners: unknown,
+  players: OnlineGamePlayer[],
+): OnlinePropertyOwners | null {
+  if (propertyOwners === undefined) {
+    return {};
+  }
+
+  if (!isRecord(propertyOwners)) {
+    return null;
+  }
+
+  const playerIds = new Set(players.map((player) => player.id));
+  const parsedPropertyOwners: OnlinePropertyOwners = {};
+
+  for (const [position, ownerId] of Object.entries(propertyOwners)) {
+    const numericPosition = Number(position);
+    const boardSpace = ONLINE_BOARD_SPACES[numericPosition];
+
+    if (
+      !Number.isInteger(numericPosition) ||
+      numericPosition < 0 ||
+      numericPosition >= BOARD_SPACE_COUNT ||
+      !boardSpace ||
+      !isOnlinePropertySpace(boardSpace) ||
+      typeof ownerId !== "string" ||
+      !playerIds.has(ownerId)
+    ) {
+      return null;
+    }
+
+    parsedPropertyOwners[position] = ownerId;
+  }
+
+  return parsedPropertyOwners;
+}
+
+function parsePendingPropertyPurchasePosition(position: unknown) {
+  if (position === undefined || position === null) {
+    return null;
+  }
+
+  if (
+    typeof position !== "number" ||
+    !Number.isInteger(position) ||
+    position < 0 ||
+    position >= BOARD_SPACE_COUNT ||
+    !isOnlinePropertySpace(ONLINE_BOARD_SPACES[position])
+  ) {
+    return undefined;
+  }
+
+  return position;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

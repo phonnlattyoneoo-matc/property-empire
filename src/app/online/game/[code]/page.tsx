@@ -12,10 +12,13 @@ import {
 } from "@/lib/game-state";
 import {
   ONLINE_BOARD_SPACES,
+  isOnlinePropertySpace,
   onlineSpaceStyles,
+  type OnlinePropertySpace,
 } from "@/lib/online-board";
 import {
   parseOnlineGameStateRow,
+  type OnlineGameState,
   type OnlineGamePlayer,
   type OnlineGameStateRow,
 } from "@/lib/online-game-state";
@@ -55,6 +58,16 @@ function rollDie() {
   return Math.floor(Math.random() * 6) + 1;
 }
 
+function getPropertyOwner(gameState: OnlineGameState, position: number) {
+  const ownerId = gameState.propertyOwners[String(position)];
+
+  if (!ownerId) {
+    return null;
+  }
+
+  return gameState.players.find((player) => player.id === ownerId) ?? null;
+}
+
 function getNotFoundMessage(error: { code?: string } | null) {
   return error?.code === "PGRST116"
     ? "Room not found for this online player."
@@ -77,6 +90,20 @@ export default function OnlineGamePage() {
   const gameState = gameRow?.state ?? null;
   const currentPlayer =
     gameState?.players[gameState.currentPlayerIndex] ?? null;
+  const currentSpace = currentPlayer
+    ? ONLINE_BOARD_SPACES[currentPlayer.position]
+    : null;
+  const currentProperty =
+    currentSpace && isOnlinePropertySpace(currentSpace)
+      ? currentSpace
+      : null;
+  const currentPropertyOwner =
+    gameState && currentPlayer && currentProperty
+      ? getPropertyOwner(gameState, currentPlayer.position)
+      : null;
+  const hasPendingPropertyPurchase =
+    gameState?.pendingPropertyPurchasePosition !== null &&
+    gameState?.pendingPropertyPurchasePosition !== undefined;
   const localPlayer = gameState?.players.find((player) => {
     return player.userId === currentUserId;
   });
@@ -85,10 +112,27 @@ export default function OnlineGamePage() {
   const canRoll =
     Boolean(room && gameRow && isCurrentPlayer) &&
     !gameState?.hasRolledThisTurn &&
+    !hasPendingPropertyPurchase &&
     !isActing;
   const canEndTurn =
     Boolean(room && gameRow && isCurrentPlayer) &&
     Boolean(gameState?.hasRolledThisTurn) &&
+    !hasPendingPropertyPurchase &&
+    !isActing;
+  const canBuyProperty =
+    Boolean(room && gameRow && isCurrentPlayer && currentPlayer) &&
+    hasPendingPropertyPurchase &&
+    currentProperty !== null &&
+    currentPropertyOwner === null &&
+    currentPlayer!.position === gameState?.pendingPropertyPurchasePosition &&
+    currentPlayer!.balance >= currentProperty.price &&
+    !isActing;
+  const canSkipProperty =
+    Boolean(room && gameRow && isCurrentPlayer && currentPlayer) &&
+    hasPendingPropertyPurchase &&
+    currentProperty !== null &&
+    currentPropertyOwner === null &&
+    currentPlayer!.position === gameState?.pendingPropertyPurchasePosition &&
     !isActing;
 
   const loadRoom = useCallback(
@@ -154,6 +198,7 @@ export default function OnlineGamePage() {
       }
 
       setGameRow(parsedGameState);
+      setErrorMessage("");
 
       return parsedGameState;
     },
@@ -318,6 +363,177 @@ export default function OnlineGamePage() {
     }
   }
 
+  async function buyProperty() {
+    if (
+      !supabase ||
+      !room ||
+      !gameRow ||
+      !currentProperty ||
+      gameState?.pendingPropertyPurchasePosition === null ||
+      gameState?.pendingPropertyPurchasePosition === undefined ||
+      !canBuyProperty
+    ) {
+      return;
+    }
+
+    setIsActing(true);
+    setErrorMessage("");
+
+    try {
+      const { data, error } = await supabase.rpc("buy_online_property", {
+        expected_version: gameRow.version,
+        property_position: gameState.pendingPropertyPurchasePosition,
+        target_room_id: room.id,
+      });
+
+      if (error) {
+        throw error;
+      }
+
+      const parsedGameState = parseOnlineGameStateRow(data);
+
+      if (!parsedGameState) {
+        throw new Error("Online game state is invalid after buying.");
+      }
+
+      setGameRow(parsedGameState);
+    } catch (error) {
+      setErrorMessage(getSafeSupabaseErrorMessage(error));
+      await loadGameState(room.id).catch(() => undefined);
+    } finally {
+      setIsActing(false);
+    }
+  }
+
+  async function skipPropertyPurchase() {
+    if (
+      !supabase ||
+      !room ||
+      !gameRow ||
+      !currentProperty ||
+      gameState?.pendingPropertyPurchasePosition === null ||
+      gameState?.pendingPropertyPurchasePosition === undefined ||
+      !canSkipProperty
+    ) {
+      return;
+    }
+
+    setIsActing(true);
+    setErrorMessage("");
+
+    try {
+      const { data, error } = await supabase.rpc(
+        "skip_online_property_purchase",
+        {
+          expected_version: gameRow.version,
+          property_position: gameState.pendingPropertyPurchasePosition,
+          target_room_id: room.id,
+        },
+      );
+
+      if (error) {
+        throw error;
+      }
+
+      const parsedGameState = parseOnlineGameStateRow(data);
+
+      if (!parsedGameState) {
+        throw new Error("Online game state is invalid after skipping.");
+      }
+
+      setGameRow(parsedGameState);
+    } catch (error) {
+      setErrorMessage(getSafeSupabaseErrorMessage(error));
+      await loadGameState(room.id).catch(() => undefined);
+    } finally {
+      setIsActing(false);
+    }
+  }
+
+  function renderPropertyPanel(property: OnlinePropertySpace) {
+    if (!gameState || !currentPlayer) {
+      return null;
+    }
+
+    const isPendingProperty =
+      gameState.pendingPropertyPurchasePosition === currentPlayer.position;
+    const owner = currentPropertyOwner;
+
+    return (
+      <div className="border-2 border-[#171915] bg-white/90 p-4 shadow-[8px_8px_0_0_#3454d1] backdrop-blur">
+        <h2 className="text-2xl font-black">Property</h2>
+
+        <div className="mt-4 space-y-3 border-2 border-[#171915] bg-[#f7f8f4] p-3">
+          <div>
+            <p className="text-sm font-black uppercase text-[#596057]">
+              Space
+            </p>
+            <p className="break-words text-xl font-black">{property.name}</p>
+          </div>
+
+          <div className="grid grid-cols-3 gap-3">
+            <div>
+              <p className="text-xs font-black uppercase text-[#596057]">
+                Price
+              </p>
+              <p className="text-lg font-black">
+                {formatCurrency(property.price)}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs font-black uppercase text-[#596057]">
+                Rent
+              </p>
+              <p className="text-lg font-black">
+                {formatCurrency(property.rent)}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs font-black uppercase text-[#596057]">
+                Balance
+              </p>
+              <p className="text-lg font-black">
+                {formatCurrency(currentPlayer.balance)}
+              </p>
+            </div>
+          </div>
+
+          {owner ? (
+            <p className="border-2 border-[#171915] bg-white p-3 text-sm font-bold leading-6 text-[#445045]">
+              {owner.id === currentPlayer.id
+                ? `${currentPlayer.name} already owns ${property.name}.`
+                : `${property.name} is owned by ${owner.name}. Rent has been paid automatically.`}
+            </p>
+          ) : isPendingProperty ? (
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
+              <button
+                className="h-12 border-2 border-[#171915] bg-[#06d6a0] px-4 text-sm font-bold text-[#171915] shadow-[5px_5px_0_0_#171915] transition-transform hover:-translate-y-0.5 focus:outline-none focus:ring-4 focus:ring-[#06d6a0]/35 disabled:cursor-not-allowed disabled:bg-[#c6cbbf] disabled:text-[#596057] disabled:shadow-none"
+                disabled={!canBuyProperty}
+                onClick={buyProperty}
+                type="button"
+              >
+                {isActing ? "Buying..." : "Buy Property"}
+              </button>
+
+              <button
+                className="h-12 border-2 border-[#171915] bg-[#f7f8f4] px-4 text-sm font-bold text-[#171915] shadow-[5px_5px_0_0_#ef476f] transition-transform hover:-translate-y-0.5 focus:outline-none focus:ring-4 focus:ring-[#ef476f]/35 disabled:cursor-not-allowed disabled:bg-[#c6cbbf] disabled:text-[#596057] disabled:shadow-none"
+                disabled={!canSkipProperty}
+                onClick={skipPropertyPurchase}
+                type="button"
+              >
+                {isActing ? "Skipping..." : "Skip Purchase"}
+              </button>
+            </div>
+          ) : (
+            <p className="border-2 border-[#171915] bg-white p-3 text-sm font-bold leading-6 text-[#445045]">
+              No owner yet. Purchase skipped for this turn.
+            </p>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   function renderPlayerCard(player: OnlineGamePlayer, playerIndex: number) {
     const isActive = playerIndex === gameState?.currentPlayerIndex;
     const isLocalPlayer = player.userId === currentUserId;
@@ -414,6 +630,9 @@ export default function OnlineGamePage() {
               <div className="grid aspect-square min-w-[620px] grid-cols-7 grid-rows-7 border-2 border-[#171915] bg-[#171915] shadow-[12px_12px_0_0_#f9c74f]">
                 {ONLINE_BOARD_SPACES.map((space, index) => {
                   const styles = onlineSpaceStyles[space.type];
+                  const propertyOwner = isOnlinePropertySpace(space)
+                    ? getPropertyOwner(gameState, index)
+                    : null;
                   const playersOnSpace = gameState.players.filter(
                     (player) => player.position === index,
                   );
@@ -438,6 +657,29 @@ export default function OnlineGamePage() {
                       <span className="text-[0.52rem] font-bold uppercase leading-tight text-[#596057] sm:text-[0.62rem]">
                         {styles.label}
                       </span>
+
+                      {isOnlinePropertySpace(space) ? (
+                        <div className="mt-1 space-y-0.5">
+                          {propertyOwner ? (
+                            <span
+                              className="block truncate border border-[#171915] px-1 py-0.5 text-[0.5rem] font-black uppercase leading-tight text-white sm:text-[0.58rem]"
+                              title={`Owner: ${propertyOwner.name}`}
+                              style={{
+                                backgroundColor: propertyOwner.color,
+                              }}
+                            >
+                              Owner: {propertyOwner.name}
+                            </span>
+                          ) : (
+                            <span className="block text-[0.5rem] font-black leading-tight text-[#445045] sm:text-[0.58rem]">
+                              Price {formatCurrency(space.price)}
+                            </span>
+                          )}
+                          <span className="block text-[0.5rem] font-black leading-tight text-[#445045] sm:text-[0.58rem]">
+                            Rent {formatCurrency(space.rent)}
+                          </span>
+                        </div>
+                      ) : null}
 
                       {playersOnSpace.length > 0 ? (
                         <div className="mt-1 flex flex-wrap gap-1">
@@ -511,6 +753,10 @@ export default function OnlineGamePage() {
             </p>
           </div>
 
+          {gameState?.hasRolledThisTurn && currentProperty
+            ? renderPropertyPanel(currentProperty)
+            : null}
+
           <div className="border-2 border-[#171915] bg-white/90 p-4 shadow-[8px_8px_0_0_#118ab2] backdrop-blur">
             <h2 className="text-2xl font-black">Turn</h2>
 
@@ -533,11 +779,15 @@ export default function OnlineGamePage() {
               </div>
               <p className="text-sm font-bold leading-6 text-[#445045]">
                 {isCurrentPlayer
-                  ? gameState?.hasRolledThisTurn
-                    ? "End your turn when ready."
-                    : "Your turn to roll."
+                  ? hasPendingPropertyPurchase
+                    ? "Buy or skip the property before ending your turn."
+                    : gameState?.hasRolledThisTurn
+                      ? "End your turn when ready."
+                      : "Your turn to roll."
                   : currentPlayer
-                    ? `Waiting for ${currentPlayer.name}.`
+                    ? hasPendingPropertyPurchase
+                      ? `Waiting for ${currentPlayer.name} to decide on a property.`
+                      : `Waiting for ${currentPlayer.name}.`
                     : "Waiting for game state."}
               </p>
             </div>
