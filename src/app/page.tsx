@@ -38,13 +38,22 @@ export default function Home() {
         <p className="mt-6 max-w-2xl text-xl font-medium leading-8 text-[#445045] sm:text-2xl">
           Build your empire. Bankrupt your friends.
         </p>
-        <button
-          className="mt-10 flex h-14 min-w-44 items-center justify-center border-2 border-[#171915] bg-[#171915] px-8 text-base font-bold text-white shadow-[8px_8px_0_0_#f9c74f] transition-transform hover:-translate-y-0.5 focus:outline-none focus:ring-4 focus:ring-[#f9c74f]/60"
-          onClick={() => router.push("/setup")}
-          type="button"
-        >
-          Start Game
-        </button>
+        <div className="mt-10 grid w-full max-w-xl gap-4 sm:grid-cols-2">
+          <button
+            className="flex h-14 items-center justify-center border-2 border-[#171915] bg-[#171915] px-8 text-base font-bold text-white shadow-[8px_8px_0_0_#f9c74f] transition-transform hover:-translate-y-0.5 focus:outline-none focus:ring-4 focus:ring-[#f9c74f]/60"
+            onClick={() => router.push("/setup")}
+            type="button"
+          >
+            Local Game
+          </button>
+          <button
+            className="flex h-14 items-center justify-center border-2 border-[#171915] bg-[#06d6a0] px-8 text-base font-bold text-[#171915] shadow-[8px_8px_0_0_#171915] transition-transform hover:-translate-y-0.5 focus:outline-none focus:ring-4 focus:ring-[#06d6a0]/45"
+            onClick={() => router.push("/online")}
+            type="button"
+          >
+            Online Game
+          </button>
+        </div>
       </section>
     </main>
   );
