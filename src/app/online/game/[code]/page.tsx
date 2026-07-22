@@ -115,6 +115,10 @@ export default function OnlineGamePage() {
   const [isActing, setIsActing] = useState(false);
 
   const gameState = gameRow?.state ?? null;
+  const winnerPlayer =
+    gameState?.players.find((player) => player.id === gameState.winnerPlayerId) ??
+    null;
+  const isGameOver = winnerPlayer !== null;
   const currentPlayer =
     gameState?.players[gameState.currentPlayerIndex] ?? null;
   const currentSpace = currentPlayer
@@ -137,25 +141,31 @@ export default function OnlineGamePage() {
   });
   const isCurrentPlayer =
     currentPlayer !== null && currentPlayer.userId === currentUserId;
+  const isHost =
+    room !== null && currentUserId.length > 0 && room.host_user_id === currentUserId;
   const canRoll =
     Boolean(room && gameRow && isCurrentPlayer) &&
+    !isGameOver &&
     !gameState?.hasRolledThisTurn &&
     !isDetentionTurn &&
     !hasPendingPropertyPurchase &&
     !isActing;
   const canEndTurn =
     Boolean(room && gameRow && isCurrentPlayer) &&
+    !isGameOver &&
     Boolean(gameState?.hasRolledThisTurn) &&
     !isDetentionTurn &&
     !hasPendingPropertyPurchase &&
     !isActing;
   const canLeaveDetention =
     Boolean(room && gameRow && isCurrentPlayer && currentPlayer) &&
+    !isGameOver &&
     isDetentionTurn &&
     currentPlayer!.isDetained &&
     !isActing;
   const canBuySpace =
     Boolean(room && gameRow && isCurrentPlayer && currentPlayer) &&
+    !isGameOver &&
     hasPendingPropertyPurchase &&
     currentBuyableSpace !== null &&
     currentSpaceOwner === null &&
@@ -165,12 +175,15 @@ export default function OnlineGamePage() {
     !isActing;
   const canSkipPurchase =
     Boolean(room && gameRow && isCurrentPlayer && currentPlayer) &&
+    !isGameOver &&
     hasPendingPropertyPurchase &&
     currentBuyableSpace !== null &&
     currentSpaceOwner === null &&
     !isDetentionTurn &&
     currentPlayer!.position === gameState?.pendingPropertyPurchasePosition &&
     !isActing;
+  const canPlayAgain =
+    Boolean(room && gameRow && isHost && winnerPlayer) && !isActing;
 
   const loadRoom = useCallback(
     async (code: string) => {
@@ -329,6 +342,12 @@ export default function OnlineGamePage() {
       void supabase.removeChannel(channel);
     };
   }, [loadGameState, loadRoom, room, supabase]);
+
+  useEffect(() => {
+    if (room && room.status !== "started") {
+      router.replace(`/online/room/${room.code}`);
+    }
+  }, [room, router]);
 
   async function rollDice() {
     if (!supabase || !room || !gameRow || !canRoll) {
@@ -522,6 +541,33 @@ export default function OnlineGamePage() {
     }
   }
 
+  async function playAgain() {
+    if (!supabase || !room || !gameRow || !canPlayAgain) {
+      return;
+    }
+
+    setIsActing(true);
+    setErrorMessage("");
+
+    try {
+      const { error } = await supabase.rpc("restart_online_room", {
+        expected_version: gameRow.version,
+        target_room_id: room.id,
+      });
+
+      if (error) {
+        throw error;
+      }
+
+      router.push(`/online/room/${room.code}`);
+    } catch (error) {
+      setErrorMessage(getSafeSupabaseErrorMessage(error));
+      await loadGameState(room.id).catch(() => undefined);
+    } finally {
+      setIsActing(false);
+    }
+  }
+
   function renderPurchasePanel(space: OnlineBuyableSpace) {
     if (!gameState || !currentPlayer) {
       return null;
@@ -626,13 +672,16 @@ export default function OnlineGamePage() {
   }
 
   function renderPlayerCard(player: OnlineGamePlayer, playerIndex: number) {
-    const isActive = playerIndex === gameState?.currentPlayerIndex;
+    const isActive =
+      !player.isEliminated && playerIndex === gameState?.currentPlayerIndex;
     const isLocalPlayer = player.userId === currentUserId;
 
     return (
       <div
         className={`flex items-center gap-3 border-2 border-[#171915] p-3 ${
-          isActive
+          player.isEliminated
+            ? "bg-[#ffedf2] opacity-80"
+            : isActive
             ? "bg-[#f9c74f] shadow-[5px_5px_0_0_#171915]"
             : "bg-[#f7f8f4]"
         }`}
@@ -663,6 +712,11 @@ export default function OnlineGamePage() {
           {player.isDetained ? (
             <span className="border-2 border-[#171915] bg-[#ffedf2] px-2 py-1 text-[0.62rem] font-black uppercase">
               Detained
+            </span>
+          ) : null}
+          {player.isEliminated ? (
+            <span className="border-2 border-[#171915] bg-[#171915] px-2 py-1 text-[0.62rem] font-black uppercase text-white">
+              Bankrupt
             </span>
           ) : null}
         </div>
@@ -697,6 +751,34 @@ export default function OnlineGamePage() {
               {room ? `Room: ${room.code}` : "Online Game"}
             </p>
           </div>
+
+          {winnerPlayer ? (
+            <div className="mb-6 border-2 border-[#171915] bg-[#e7fbf4] p-5 shadow-[10px_10px_0_0_#06d6a0]">
+              <p className="text-sm font-black uppercase text-[#596057]">
+                Winner
+              </p>
+              <h2 className="mt-2 break-words text-4xl font-black tracking-normal sm:text-5xl">
+                {winnerPlayer.name}
+              </h2>
+              <p className="mt-3 text-lg font-bold text-[#445045]">
+                Final balance: {formatCurrency(winnerPlayer.balance)}
+              </p>
+              {isHost ? (
+                <button
+                  className="mt-5 h-12 border-2 border-[#171915] bg-[#06d6a0] px-6 text-sm font-black text-[#171915] shadow-[6px_6px_0_0_#171915] transition-transform hover:-translate-y-0.5 focus:outline-none focus:ring-4 focus:ring-[#06d6a0]/35 disabled:cursor-not-allowed disabled:bg-[#c6cbbf] disabled:text-[#596057] disabled:opacity-70 disabled:shadow-none"
+                  disabled={!canPlayAgain}
+                  onClick={playAgain}
+                  type="button"
+                >
+                  {isActing ? "Resetting..." : "Play Again"}
+                </button>
+              ) : (
+                <p className="mt-5 border-2 border-[#171915] bg-white p-3 text-sm font-bold leading-6 text-[#445045]">
+                  Waiting for the host to start a new lobby.
+                </p>
+              )}
+            </div>
+          ) : null}
 
           {!isConfigured ? (
             <div className="border-2 border-[#171915] bg-[#ffedf2] p-4 shadow-[8px_8px_0_0_#ef476f]">
@@ -738,7 +820,8 @@ export default function OnlineGamePage() {
                         )
                       : ONLINE_TRANSIT_RENTS[1];
                   const playersOnSpace = gameState.players.filter(
-                    (player) => player.position === index,
+                    (player) =>
+                      !player.isEliminated && player.position === index,
                   );
 
                   return (
@@ -868,6 +951,7 @@ export default function OnlineGamePage() {
           </div>
 
           {gameState?.hasRolledThisTurn &&
+          !isGameOver &&
           currentBuyableSpace &&
           !gameState.lastEventCard
             ? renderPurchasePanel(currentBuyableSpace)
@@ -924,21 +1008,23 @@ export default function OnlineGamePage() {
                 </p>
               </div>
               <p className="text-sm font-bold leading-6 text-[#445045]">
-                {isCurrentPlayer
-                  ? isDetentionTurn
-                    ? "Leave Civic Detention to miss this turn."
-                    : hasPendingPropertyPurchase
-                      ? "Buy or skip the space before ending your turn."
-                      : gameState?.hasRolledThisTurn
-                        ? "End your turn when ready."
-                        : "Your turn to roll."
-                  : currentPlayer
+                {winnerPlayer
+                  ? `${winnerPlayer.name} has won the game.`
+                  : isCurrentPlayer
                     ? isDetentionTurn
-                      ? `Waiting for ${currentPlayer.name} to leave Civic Detention.`
+                      ? "Leave Civic Detention to miss this turn."
                       : hasPendingPropertyPurchase
-                        ? `Waiting for ${currentPlayer.name} to decide on a space.`
-                        : `Waiting for ${currentPlayer.name}.`
-                    : "Waiting for game state."}
+                        ? "Buy or skip the space before ending your turn."
+                        : gameState?.hasRolledThisTurn
+                          ? "End your turn when ready."
+                          : "Your turn to roll."
+                    : currentPlayer
+                      ? isDetentionTurn
+                        ? `Waiting for ${currentPlayer.name} to leave Civic Detention.`
+                        : hasPendingPropertyPurchase
+                          ? `Waiting for ${currentPlayer.name} to decide on a space.`
+                          : `Waiting for ${currentPlayer.name}.`
+                      : "Waiting for game state."}
               </p>
             </div>
           </div>

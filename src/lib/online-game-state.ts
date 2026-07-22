@@ -15,6 +15,7 @@ export type OnlineGamePlayer = {
   color: string;
   balance: number;
   isDetained: boolean;
+  isEliminated: boolean;
   position: number;
 };
 
@@ -44,6 +45,7 @@ export type OnlineGameState = {
   phase: "online_game";
   players: OnlineGamePlayer[];
   propertyOwners: OnlinePropertyOwners;
+  winnerPlayerId: string | null;
 };
 
 export type OnlineGameStateRow = {
@@ -135,6 +137,7 @@ function parseOnlineGameState(state: unknown): OnlineGameState | null {
     state.propertyOwners,
     players,
   );
+  const winnerPlayerId = parseWinnerPlayerId(state.winnerPlayerId, players);
   const pendingPropertyPurchasePosition =
     parsePendingPropertyPurchasePosition(
       state.pendingPropertyPurchasePosition,
@@ -144,12 +147,37 @@ function parseOnlineGameState(state: unknown): OnlineGameState | null {
     lastRoll === undefined ||
     lastEventCard === undefined ||
     !propertyOwners ||
+    winnerPlayerId === undefined ||
     pendingPropertyPurchasePosition === undefined
   ) {
     return null;
   }
 
+  const activePlayers = players.filter((player) => !player.isEliminated);
   const currentPlayer = players[state.currentPlayerIndex];
+
+  if (activePlayers.length === 0) {
+    return null;
+  }
+
+  if (
+    winnerPlayerId !== null &&
+    (activePlayers.length !== 1 ||
+      activePlayers[0].id !== winnerPlayerId ||
+      currentPlayer.id !== winnerPlayerId ||
+      state.hasRolledThisTurn ||
+      isDetentionTurn ||
+      pendingPropertyPurchasePosition !== null)
+  ) {
+    return null;
+  }
+
+  if (
+    winnerPlayerId === null &&
+    (activePlayers.length < 2 || currentPlayer.isEliminated)
+  ) {
+    return null;
+  }
 
   if (
     isDetentionTurn &&
@@ -172,6 +200,7 @@ function parseOnlineGameState(state: unknown): OnlineGameState | null {
     phase: "online_game",
     players,
     propertyOwners,
+    winnerPlayerId,
   };
 }
 
@@ -188,6 +217,8 @@ function parseOnlineGamePlayer(player: unknown): OnlineGamePlayer | null {
     typeof player.color !== "string" ||
     (player.isDetained !== undefined &&
       typeof player.isDetained !== "boolean") ||
+    (player.isEliminated !== undefined &&
+      typeof player.isEliminated !== "boolean") ||
     typeof player.balance !== "number" ||
     !Number.isFinite(player.balance) ||
     typeof player.position !== "number" ||
@@ -203,6 +234,7 @@ function parseOnlineGamePlayer(player: unknown): OnlineGamePlayer | null {
     color: player.color,
     id: player.id,
     isDetained: player.isDetained === true,
+    isEliminated: player.isEliminated === true,
     name: player.name.trim(),
     position: player.position,
     userId: player.userId,
@@ -303,6 +335,24 @@ function parseOnlinePropertyOwners(
   }
 
   return parsedPropertyOwners;
+}
+
+function parseWinnerPlayerId(
+  winnerPlayerId: unknown,
+  players: OnlineGamePlayer[],
+) {
+  if (winnerPlayerId === undefined || winnerPlayerId === null) {
+    return null;
+  }
+
+  if (
+    typeof winnerPlayerId !== "string" ||
+    !players.some((player) => player.id === winnerPlayerId)
+  ) {
+    return undefined;
+  }
+
+  return winnerPlayerId;
 }
 
 function parsePendingPropertyPurchasePosition(position: unknown) {
