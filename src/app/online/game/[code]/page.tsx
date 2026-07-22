@@ -129,6 +129,35 @@ function getConnectionStatusClassName(status: OnlineConnectionStatus) {
   return "bg-[#ffedf2] text-[#171915]";
 }
 
+function formatTurnTimer(remainingSeconds: number | null) {
+  if (remainingSeconds === null) {
+    return "--:--";
+  }
+
+  const minutes = Math.floor(remainingSeconds / 60);
+  const seconds = remainingSeconds % 60;
+
+  return `${minutes}:${seconds.toString().padStart(2, "0")}`;
+}
+
+function isExpectedTimerExpirationRace(error: unknown) {
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof error === "object" &&
+          error !== null &&
+          "message" in error &&
+          typeof error.message === "string"
+        ? error.message
+        : "";
+
+  return (
+    message.includes("Game state changed") ||
+    message.includes("has not expired") ||
+    message.includes("already finished")
+  );
+}
+
 export default function OnlineGamePage() {
   const params = useParams<{ code: string }>();
   const router = useRouter();
@@ -146,6 +175,7 @@ export default function OnlineGamePage() {
   const [isLoading, setIsLoading] = useState(isConfigured);
   const [isReconnecting, setIsReconnecting] = useState(false);
   const [isActing, setIsActing] = useState(false);
+  const [isExpiringTurn, setIsExpiringTurn] = useState(false);
 
   const gameState = gameRow?.state ?? null;
   const winnerPlayer =
@@ -185,12 +215,30 @@ export default function OnlineGamePage() {
     currentPlayer !== null && currentPlayer.userId === currentUserId;
   const isHost =
     room !== null && currentUserId.length > 0 && room.host_user_id === currentUserId;
+  const turnDeadlineMs = gameState?.turnDeadlineAt
+    ? Date.parse(gameState.turnDeadlineAt)
+    : null;
+  const hasActiveTurnTimer =
+    turnDeadlineMs !== null &&
+    Number.isFinite(turnDeadlineMs) &&
+    winnerPlayer === null;
+  const remainingTurnSeconds = hasActiveTurnTimer
+    ? Math.max(0, Math.ceil((turnDeadlineMs! - presenceNowMs) / 1_000))
+    : null;
+  const isTurnTimerExpired =
+    hasActiveTurnTimer && remainingTurnSeconds === 0;
+  const turnTimerProgress =
+    remainingTurnSeconds === null
+      ? 0
+      : Math.max(0, Math.min(100, (remainingTurnSeconds / 60) * 100));
   const canRoll =
     Boolean(room && gameRow && isCurrentPlayer) &&
     !isGameOver &&
     !gameState?.hasRolledThisTurn &&
     !isDetentionTurn &&
     !hasPendingPropertyPurchase &&
+    !isTurnTimerExpired &&
+    !isExpiringTurn &&
     !isActing;
   const canEndTurn =
     Boolean(room && gameRow && isCurrentPlayer) &&
@@ -198,12 +246,16 @@ export default function OnlineGamePage() {
     Boolean(gameState?.hasRolledThisTurn) &&
     !isDetentionTurn &&
     !hasPendingPropertyPurchase &&
+    !isTurnTimerExpired &&
+    !isExpiringTurn &&
     !isActing;
   const canLeaveDetention =
     Boolean(room && gameRow && isCurrentPlayer && currentPlayer) &&
     !isGameOver &&
     isDetentionTurn &&
     currentPlayer!.isDetained &&
+    !isTurnTimerExpired &&
+    !isExpiringTurn &&
     !isActing;
   const canBuySpace =
     Boolean(room && gameRow && isCurrentPlayer && currentPlayer) &&
@@ -214,6 +266,8 @@ export default function OnlineGamePage() {
     !isDetentionTurn &&
     currentPlayer!.position === gameState?.pendingPropertyPurchasePosition &&
     currentPlayer!.balance >= currentBuyableSpace.price &&
+    !isTurnTimerExpired &&
+    !isExpiringTurn &&
     !isActing;
   const canSkipPurchase =
     Boolean(room && gameRow && isCurrentPlayer && currentPlayer) &&
@@ -223,6 +277,8 @@ export default function OnlineGamePage() {
     currentSpaceOwner === null &&
     !isDetentionTurn &&
     currentPlayer!.position === gameState?.pendingPropertyPurchasePosition &&
+    !isTurnTimerExpired &&
+    !isExpiringTurn &&
     !isActing;
   const canPlayAgain =
     Boolean(room && gameRow && isHost && winnerPlayer) && !isActing;
@@ -511,6 +567,84 @@ export default function OnlineGamePage() {
       window.removeEventListener("focus", sendHeartbeat);
     };
   }, [currentUserId, room, storedOnlineSession, supabase]);
+
+  useEffect(() => {
+    if (
+      !supabase ||
+      !room ||
+      !gameRow ||
+      !gameState ||
+      !gameState.turnDeadlineAt ||
+      winnerPlayer ||
+      !isTurnTimerExpired ||
+      isExpiringTurn
+    ) {
+      return;
+    }
+
+    let isActive = true;
+    const activeSupabase = supabase;
+    const activeRoomId = room.id;
+    const expectedVersion = gameRow.version;
+
+    async function expireTurn() {
+      setIsExpiringTurn(true);
+
+      try {
+        const { data, error } = await activeSupabase.rpc(
+          "expire_online_turn",
+          {
+            expected_version: expectedVersion,
+            target_room_id: activeRoomId,
+          },
+        );
+
+        if (error) {
+          throw error;
+        }
+
+        const parsedGameState = parseOnlineGameStateRow(data);
+
+        if (!parsedGameState) {
+          throw new Error("Online game state is invalid after timer expiry.");
+        }
+
+        if (isActive) {
+          setGameRow(parsedGameState);
+          setErrorMessage("");
+        }
+      } catch (error) {
+        if (!isActive) {
+          return;
+        }
+
+        if (!isExpectedTimerExpirationRace(error)) {
+          setErrorMessage(getSafeSupabaseErrorMessage(error));
+        }
+
+        await loadGameState(activeRoomId).catch(() => undefined);
+      } finally {
+        if (isActive) {
+          setIsExpiringTurn(false);
+        }
+      }
+    }
+
+    void expireTurn();
+
+    return () => {
+      isActive = false;
+    };
+  }, [
+    gameRow,
+    gameState,
+    isExpiringTurn,
+    isTurnTimerExpired,
+    loadGameState,
+    room,
+    supabase,
+    winnerPlayer,
+  ]);
 
   useEffect(() => {
     if (!supabase || !room?.id) {
@@ -1255,6 +1389,40 @@ export default function OnlineGamePage() {
             <h2 className="text-2xl font-black">Turn</h2>
 
             <div className="mt-4 space-y-3 border-2 border-[#171915] bg-[#f7f8f4] p-3">
+              <div>
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-xs font-black uppercase text-[#596057]">
+                    Turn Timer
+                  </p>
+                  <span
+                    className={`border-2 border-[#171915] px-2 py-1 text-xs font-black uppercase ${
+                      isTurnTimerExpired
+                        ? "bg-[#ffedf2]"
+                        : hasActiveTurnTimer
+                          ? "bg-[#e7fbf4]"
+                          : "bg-white"
+                    }`}
+                  >
+                    {isTurnTimerExpired
+                      ? isExpiringTurn
+                        ? "Resolving"
+                        : "Expired"
+                      : hasActiveTurnTimer
+                        ? "Live"
+                        : "Paused"}
+                  </span>
+                </div>
+                <p className="mt-1 text-3xl font-black">
+                  {formatTurnTimer(remainingTurnSeconds)}
+                </p>
+                <div className="mt-2 h-3 border-2 border-[#171915] bg-white">
+                  <div
+                    className="h-full bg-[#06d6a0] transition-[width] duration-500"
+                    style={{ width: `${turnTimerProgress}%` }}
+                  />
+                </div>
+              </div>
+
               <div>
                 <p className="text-xs font-black uppercase text-[#596057]">
                   Current Player

@@ -45,6 +45,7 @@ export type OnlineGameState = {
   phase: "online_game";
   players: OnlineGamePlayer[];
   propertyOwners: OnlinePropertyOwners;
+  turnDeadlineAt: string | null;
   winnerPlayerId: string | null;
 };
 
@@ -138,6 +139,7 @@ function parseOnlineGameState(state: unknown): OnlineGameState | null {
     players,
   );
   const winnerPlayerId = parseWinnerPlayerId(state.winnerPlayerId, players);
+  const turnDeadlineAt = parseTurnDeadlineAt(state.turnDeadlineAt);
   const pendingPropertyPurchasePosition =
     parsePendingPropertyPurchasePosition(
       state.pendingPropertyPurchasePosition,
@@ -148,6 +150,7 @@ function parseOnlineGameState(state: unknown): OnlineGameState | null {
     lastEventCard === undefined ||
     !propertyOwners ||
     winnerPlayerId === undefined ||
+    turnDeadlineAt === undefined ||
     pendingPropertyPurchasePosition === undefined
   ) {
     return null;
@@ -167,7 +170,8 @@ function parseOnlineGameState(state: unknown): OnlineGameState | null {
       currentPlayer.id !== winnerPlayerId ||
       state.hasRolledThisTurn ||
       isDetentionTurn ||
-      pendingPropertyPurchasePosition !== null)
+      pendingPropertyPurchasePosition !== null ||
+      turnDeadlineAt !== null)
   ) {
     return null;
   }
@@ -200,6 +204,7 @@ function parseOnlineGameState(state: unknown): OnlineGameState | null {
     phase: "online_game",
     players,
     propertyOwners,
+    turnDeadlineAt,
     winnerPlayerId,
   };
 }
@@ -353,6 +358,22 @@ function parseWinnerPlayerId(
   }
 
   return winnerPlayerId;
+}
+
+function parseTurnDeadlineAt(turnDeadlineAt: unknown) {
+  if (turnDeadlineAt === undefined || turnDeadlineAt === null) {
+    return null;
+  }
+
+  if (
+    typeof turnDeadlineAt !== "string" ||
+    turnDeadlineAt.trim().length === 0 ||
+    !Number.isFinite(Date.parse(turnDeadlineAt))
+  ) {
+    return undefined;
+  }
+
+  return turnDeadlineAt;
 }
 
 function parsePendingPropertyPurchasePosition(position: unknown) {
