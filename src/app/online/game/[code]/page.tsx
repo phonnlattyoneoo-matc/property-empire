@@ -12,10 +12,13 @@ import {
 } from "@/lib/game-state";
 import {
   ONLINE_BOARD_SPACES,
+  ONLINE_TRANSIT_RENTS,
+  isOnlineBuyableSpace,
   isOnlinePropertySpace,
   isOnlineTaxSpace,
+  isOnlineTransitSpace,
   onlineSpaceStyles,
-  type OnlinePropertySpace,
+  type OnlineBuyableSpace,
 } from "@/lib/online-board";
 import {
   parseOnlineGameStateRow,
@@ -55,11 +58,15 @@ function formatCurrency(amount: number) {
   }).format(amount);
 }
 
+function formatTransitRentTiers(separator = " / ") {
+  return ONLINE_TRANSIT_RENTS.slice(1).map(formatCurrency).join(separator);
+}
+
 function rollDie() {
   return Math.floor(Math.random() * 6) + 1;
 }
 
-function getPropertyOwner(gameState: OnlineGameState, position: number) {
+function getSpaceOwner(gameState: OnlineGameState, position: number) {
   const ownerId = gameState.propertyOwners[String(position)];
 
   if (!ownerId) {
@@ -67,6 +74,25 @@ function getPropertyOwner(gameState: OnlineGameState, position: number) {
   }
 
   return gameState.players.find((player) => player.id === ownerId) ?? null;
+}
+
+function getOwnedTransitCount(gameState: OnlineGameState, ownerId: string) {
+  return ONLINE_BOARD_SPACES.reduce((ownedTransitCount, space, position) => {
+    if (
+      isOnlineTransitSpace(space) &&
+      gameState.propertyOwners[String(position)] === ownerId
+    ) {
+      return ownedTransitCount + 1;
+    }
+
+    return ownedTransitCount;
+  }, 0);
+}
+
+function getTransitRent(stationCount: number) {
+  return ONLINE_TRANSIT_RENTS[
+    Math.min(stationCount, ONLINE_TRANSIT_RENTS.length - 1)
+  ];
 }
 
 function getNotFoundMessage(error: { code?: string } | null) {
@@ -94,13 +120,13 @@ export default function OnlineGamePage() {
   const currentSpace = currentPlayer
     ? ONLINE_BOARD_SPACES[currentPlayer.position]
     : null;
-  const currentProperty =
-    currentSpace && isOnlinePropertySpace(currentSpace)
+  const currentBuyableSpace =
+    currentSpace && isOnlineBuyableSpace(currentSpace)
       ? currentSpace
       : null;
-  const currentPropertyOwner =
-    gameState && currentPlayer && currentProperty
-      ? getPropertyOwner(gameState, currentPlayer.position)
+  const currentSpaceOwner =
+    gameState && currentPlayer && currentBuyableSpace
+      ? getSpaceOwner(gameState, currentPlayer.position)
       : null;
   const hasPendingPropertyPurchase =
     gameState?.pendingPropertyPurchasePosition !== null &&
@@ -128,20 +154,20 @@ export default function OnlineGamePage() {
     isDetentionTurn &&
     currentPlayer!.isDetained &&
     !isActing;
-  const canBuyProperty =
+  const canBuySpace =
     Boolean(room && gameRow && isCurrentPlayer && currentPlayer) &&
     hasPendingPropertyPurchase &&
-    currentProperty !== null &&
-    currentPropertyOwner === null &&
+    currentBuyableSpace !== null &&
+    currentSpaceOwner === null &&
     !isDetentionTurn &&
     currentPlayer!.position === gameState?.pendingPropertyPurchasePosition &&
-    currentPlayer!.balance >= currentProperty.price &&
+    currentPlayer!.balance >= currentBuyableSpace.price &&
     !isActing;
-  const canSkipProperty =
+  const canSkipPurchase =
     Boolean(room && gameRow && isCurrentPlayer && currentPlayer) &&
     hasPendingPropertyPurchase &&
-    currentProperty !== null &&
-    currentPropertyOwner === null &&
+    currentBuyableSpace !== null &&
+    currentSpaceOwner === null &&
     !isDetentionTurn &&
     currentPlayer!.position === gameState?.pendingPropertyPurchasePosition &&
     !isActing;
@@ -409,15 +435,15 @@ export default function OnlineGamePage() {
     }
   }
 
-  async function buyProperty() {
+  async function buySpace() {
     if (
       !supabase ||
       !room ||
       !gameRow ||
-      !currentProperty ||
+      !currentBuyableSpace ||
       gameState?.pendingPropertyPurchasePosition === null ||
       gameState?.pendingPropertyPurchasePosition === undefined ||
-      !canBuyProperty
+      !canBuySpace
     ) {
       return;
     }
@@ -451,15 +477,15 @@ export default function OnlineGamePage() {
     }
   }
 
-  async function skipPropertyPurchase() {
+  async function skipPurchase() {
     if (
       !supabase ||
       !room ||
       !gameRow ||
-      !currentProperty ||
+      !currentBuyableSpace ||
       gameState?.pendingPropertyPurchasePosition === null ||
       gameState?.pendingPropertyPurchasePosition === undefined ||
-      !canSkipProperty
+      !canSkipPurchase
     ) {
       return;
     }
@@ -496,25 +522,38 @@ export default function OnlineGamePage() {
     }
   }
 
-  function renderPropertyPanel(property: OnlinePropertySpace) {
+  function renderPurchasePanel(space: OnlineBuyableSpace) {
     if (!gameState || !currentPlayer) {
       return null;
     }
 
-    const isPendingProperty =
+    const isTransit = isOnlineTransitSpace(space);
+    const isPendingPurchase =
       gameState.pendingPropertyPurchasePosition === currentPlayer.position;
-    const owner = currentPropertyOwner;
+    const owner = currentSpaceOwner;
+    const transitRent =
+      isTransit && owner
+        ? getTransitRent(getOwnedTransitCount(gameState, owner.id))
+        : ONLINE_TRANSIT_RENTS[1];
+    const rentLabel = isTransit ? "Transit Rent" : "Rent";
+    const rentValue = isOnlinePropertySpace(space)
+      ? formatCurrency(space.rent)
+      : owner
+        ? formatCurrency(transitRent)
+        : formatTransitRentTiers();
 
     return (
       <div className="border-2 border-[#171915] bg-white/90 p-4 shadow-[8px_8px_0_0_#3454d1] backdrop-blur">
-        <h2 className="text-2xl font-black">Property</h2>
+        <h2 className="text-2xl font-black">
+          {isTransit ? "Transit" : "Property"}
+        </h2>
 
         <div className="mt-4 space-y-3 border-2 border-[#171915] bg-[#f7f8f4] p-3">
           <div>
             <p className="text-sm font-black uppercase text-[#596057]">
               Space
             </p>
-            <p className="break-words text-xl font-black">{property.name}</p>
+            <p className="break-words text-xl font-black">{space.name}</p>
           </div>
 
           <div className="grid grid-cols-3 gap-3">
@@ -523,16 +562,14 @@ export default function OnlineGamePage() {
                 Price
               </p>
               <p className="text-lg font-black">
-                {formatCurrency(property.price)}
+                {formatCurrency(space.price)}
               </p>
             </div>
             <div>
               <p className="text-xs font-black uppercase text-[#596057]">
-                Rent
+                {rentLabel}
               </p>
-              <p className="text-lg font-black">
-                {formatCurrency(property.rent)}
-              </p>
+              <p className="text-lg font-black">{rentValue}</p>
             </div>
             <div>
               <p className="text-xs font-black uppercase text-[#596057]">
@@ -547,24 +584,32 @@ export default function OnlineGamePage() {
           {owner ? (
             <p className="border-2 border-[#171915] bg-white p-3 text-sm font-bold leading-6 text-[#445045]">
               {owner.id === currentPlayer.id
-                ? `${currentPlayer.name} already owns ${property.name}.`
-                : `${property.name} is owned by ${owner.name}. Rent has been paid automatically.`}
+                ? `${currentPlayer.name} already owns ${space.name}.`
+                : isTransit
+                  ? `${space.name} is owned by ${owner.name}. ${currentPlayer.name} paid ${formatCurrency(
+                      transitRent,
+                    )} transit rent.`
+                  : `${space.name} is owned by ${owner.name}. Rent has been paid automatically.`}
             </p>
-          ) : isPendingProperty ? (
+          ) : isPendingPurchase ? (
             <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
               <button
                 className="h-12 border-2 border-[#171915] bg-[#06d6a0] px-4 text-sm font-bold text-[#171915] shadow-[5px_5px_0_0_#171915] transition-transform hover:-translate-y-0.5 focus:outline-none focus:ring-4 focus:ring-[#06d6a0]/35 disabled:cursor-not-allowed disabled:bg-[#c6cbbf] disabled:text-[#596057] disabled:shadow-none"
-                disabled={!canBuyProperty}
-                onClick={buyProperty}
+                disabled={!canBuySpace}
+                onClick={buySpace}
                 type="button"
               >
-                {isActing ? "Buying..." : "Buy Property"}
+                {isActing
+                  ? "Buying..."
+                  : isTransit
+                    ? "Buy Transit"
+                    : "Buy Property"}
               </button>
 
               <button
                 className="h-12 border-2 border-[#171915] bg-[#f7f8f4] px-4 text-sm font-bold text-[#171915] shadow-[5px_5px_0_0_#ef476f] transition-transform hover:-translate-y-0.5 focus:outline-none focus:ring-4 focus:ring-[#ef476f]/35 disabled:cursor-not-allowed disabled:bg-[#c6cbbf] disabled:text-[#596057] disabled:shadow-none"
-                disabled={!canSkipProperty}
-                onClick={skipPropertyPurchase}
+                disabled={!canSkipPurchase}
+                onClick={skipPurchase}
                 type="button"
               >
                 {isActing ? "Skipping..." : "Skip Purchase"}
@@ -683,9 +728,15 @@ export default function OnlineGamePage() {
               <div className="grid aspect-square min-w-[620px] grid-cols-7 grid-rows-7 border-2 border-[#171915] bg-[#171915] shadow-[12px_12px_0_0_#f9c74f]">
                 {ONLINE_BOARD_SPACES.map((space, index) => {
                   const styles = onlineSpaceStyles[space.type];
-                  const propertyOwner = isOnlinePropertySpace(space)
-                    ? getPropertyOwner(gameState, index)
+                  const spaceOwner = isOnlineBuyableSpace(space)
+                    ? getSpaceOwner(gameState, index)
                     : null;
+                  const transitRent =
+                    isOnlineTransitSpace(space) && spaceOwner
+                      ? getTransitRent(
+                          getOwnedTransitCount(gameState, spaceOwner.id),
+                        )
+                      : ONLINE_TRANSIT_RENTS[1];
                   const playersOnSpace = gameState.players.filter(
                     (player) => player.position === index,
                   );
@@ -711,17 +762,17 @@ export default function OnlineGamePage() {
                         {styles.label}
                       </span>
 
-                      {isOnlinePropertySpace(space) ? (
+                      {isOnlineBuyableSpace(space) ? (
                         <div className="mt-1 space-y-0.5">
-                          {propertyOwner ? (
+                          {spaceOwner ? (
                             <span
                               className="block truncate border border-[#171915] px-1 py-0.5 text-[0.5rem] font-black uppercase leading-tight text-white sm:text-[0.58rem]"
-                              title={`Owner: ${propertyOwner.name}`}
+                              title={`Owner: ${spaceOwner.name}`}
                               style={{
-                                backgroundColor: propertyOwner.color,
+                                backgroundColor: spaceOwner.color,
                               }}
                             >
-                              Owner: {propertyOwner.name}
+                              Owner: {spaceOwner.name}
                             </span>
                           ) : (
                             <span className="block text-[0.5rem] font-black leading-tight text-[#445045] sm:text-[0.58rem]">
@@ -729,7 +780,13 @@ export default function OnlineGamePage() {
                             </span>
                           )}
                           <span className="block text-[0.5rem] font-black leading-tight text-[#445045] sm:text-[0.58rem]">
-                            Rent {formatCurrency(space.rent)}
+                            {isOnlineTransitSpace(space)
+                              ? `Rent ${
+                                  spaceOwner
+                                    ? formatCurrency(transitRent)
+                                    : formatTransitRentTiers("/")
+                                }`
+                              : `Rent ${formatCurrency(space.rent)}`}
                           </span>
                         </div>
                       ) : isOnlineTaxSpace(space) ? (
@@ -811,9 +868,9 @@ export default function OnlineGamePage() {
           </div>
 
           {gameState?.hasRolledThisTurn &&
-          currentProperty &&
+          currentBuyableSpace &&
           !gameState.lastEventCard
-            ? renderPropertyPanel(currentProperty)
+            ? renderPurchasePanel(currentBuyableSpace)
             : null}
 
           {gameState?.lastEventCard ? (
@@ -871,7 +928,7 @@ export default function OnlineGamePage() {
                   ? isDetentionTurn
                     ? "Leave Civic Detention to miss this turn."
                     : hasPendingPropertyPurchase
-                      ? "Buy or skip the property before ending your turn."
+                      ? "Buy or skip the space before ending your turn."
                       : gameState?.hasRolledThisTurn
                         ? "End your turn when ready."
                         : "Your turn to roll."
@@ -879,7 +936,7 @@ export default function OnlineGamePage() {
                     ? isDetentionTurn
                       ? `Waiting for ${currentPlayer.name} to leave Civic Detention.`
                       : hasPendingPropertyPurchase
-                        ? `Waiting for ${currentPlayer.name} to decide on a property.`
+                        ? `Waiting for ${currentPlayer.name} to decide on a space.`
                         : `Waiting for ${currentPlayer.name}.`
                     : "Waiting for game state."}
               </p>

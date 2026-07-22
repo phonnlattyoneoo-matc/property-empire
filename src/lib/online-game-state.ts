@@ -5,7 +5,7 @@ import {
 } from "@/lib/game-state";
 import {
   ONLINE_BOARD_SPACES,
-  isOnlinePropertySpace,
+  isOnlineBuyableSpace,
 } from "@/lib/online-board";
 
 export type OnlineGamePlayer = {
@@ -292,7 +292,7 @@ function parseOnlinePropertyOwners(
       numericPosition < 0 ||
       numericPosition >= BOARD_SPACE_COUNT ||
       !boardSpace ||
-      !isOnlinePropertySpace(boardSpace) ||
+      !isOnlineBuyableSpace(boardSpace) ||
       typeof ownerId !== "string" ||
       !playerIds.has(ownerId)
     ) {
@@ -315,7 +315,7 @@ function parsePendingPropertyPurchasePosition(position: unknown) {
     !Number.isInteger(position) ||
     position < 0 ||
     position >= BOARD_SPACE_COUNT ||
-    !isOnlinePropertySpace(ONLINE_BOARD_SPACES[position])
+    !isOnlineBuyableSpace(ONLINE_BOARD_SPACES[position])
   ) {
     return undefined;
   }
