@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import type { FormEvent } from "react";
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   ensureAnonymousUser,
   getSupabaseBrowserClient,
@@ -19,10 +19,20 @@ import {
   normalizePlayerName,
   sanitizeRoomCode,
   type OnlineRoom,
+  type OnlineRoomPlayer,
 } from "@/lib/online-room";
+import {
+  clearOnlineSession,
+  getStoredOnlineSession,
+  isPermanentOnlineSessionError,
+  reconnectOnlineSession,
+  saveOnlineSession,
+  saveOnlineSessionFromPlayers,
+} from "@/lib/online-session";
 
 export default function OnlinePage() {
   const router = useRouter();
+  const supabase = useMemo(() => getSupabaseBrowserClient(), []);
   const [createName, setCreateName] = useState("");
   const [joinName, setJoinName] = useState("");
   const [joinCode, setJoinCode] = useState("");
@@ -31,26 +41,100 @@ export default function OnlinePage() {
   const [errorMessage, setErrorMessage] = useState("");
   const [isCreating, setIsCreating] = useState(false);
   const [isJoining, setIsJoining] = useState(false);
+  const [isReconnecting, setIsReconnecting] = useState(false);
 
   const isConfigured = hasSupabaseConfig();
   const canCreate =
     isConfigured &&
     normalizePlayerName(createName).length > 0 &&
     !isCreating &&
-    !isJoining;
+    !isJoining &&
+    !isReconnecting;
   const canJoin =
     isConfigured &&
     normalizePlayerName(joinName).length > 0 &&
     isValidRoomCode(sanitizeRoomCode(joinCode)) &&
     !isCreating &&
-    !isJoining;
+    !isJoining &&
+    !isReconnecting;
+
+  useEffect(() => {
+    if (!supabase || !isConfigured) {
+      return;
+    }
+
+    const storedSession = getStoredOnlineSession();
+
+    if (!storedSession) {
+      return;
+    }
+
+    let isActive = true;
+    const activeSupabase = supabase;
+    const activeStoredSession = storedSession;
+
+    async function reconnect() {
+      try {
+        setIsReconnecting(true);
+        setErrorMessage("");
+        setStatusMessage("Reconnecting...");
+
+        const user = await ensureAnonymousUser(activeSupabase);
+
+        if (user.id !== activeStoredSession.userId) {
+          clearOnlineSession(activeStoredSession.roomCode);
+          throw new Error(
+            "Saved online session belongs to another browser profile. Join the room again.",
+          );
+        }
+
+        const reconnectedSession = await reconnectOnlineSession(
+          activeSupabase,
+          activeStoredSession,
+        );
+
+        if (!isActive) {
+          return;
+        }
+
+        if (reconnectedSession.roomStatus === "closed") {
+          clearOnlineSession(reconnectedSession.roomCode);
+          throw new Error("That online room has been closed.");
+        }
+
+        router.replace(
+          reconnectedSession.roomStatus === "started"
+            ? `/online/game/${reconnectedSession.roomCode}`
+            : `/online/room/${reconnectedSession.roomCode}`,
+        );
+      } catch (error) {
+        if (isActive) {
+          if (isPermanentOnlineSessionError(error)) {
+            clearOnlineSession(activeStoredSession.roomCode);
+          }
+
+          setStatusMessage("");
+          setErrorMessage(getSafeSupabaseErrorMessage(error));
+        }
+      } finally {
+        if (isActive) {
+          setIsReconnecting(false);
+        }
+      }
+    }
+
+    void reconnect();
+
+    return () => {
+      isActive = false;
+    };
+  }, [isConfigured, router, supabase]);
 
   async function createRoom(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setErrorMessage("");
     setStatusMessage("");
 
-    const supabase = getSupabaseBrowserClient();
     const displayName = normalizePlayerName(createName);
 
     if (!supabase || !displayName) {
@@ -94,17 +178,33 @@ export default function OnlinePage() {
           : new Error("Could not create a unique room code.");
       }
 
-      const { error: playerError } = await supabase
+      const { data: playerData, error: playerError } = await supabase
         .from("room_players")
         .insert({
           display_name: displayName,
           room_id: room.id,
           user_id: user.id,
-        });
+        })
+        .select(
+          "id, room_id, user_id, display_name, is_host, joined_at, last_seen_at",
+        )
+        .single();
 
       if (playerError) {
         throw playerError;
       }
+
+      const player = playerData as OnlineRoomPlayer;
+      saveOnlineSession({
+        displayName: player.display_name,
+        isHost: player.is_host,
+        playerId: player.id,
+        roomCode: room.code,
+        roomId: room.id,
+        savedAt: new Date().toISOString(),
+        seatIndex: 0,
+        userId: player.user_id,
+      });
 
       setStatusMessage(`Created room ${room.code}.`);
       router.push(`/online/room/${room.code}`);
@@ -120,7 +220,6 @@ export default function OnlinePage() {
     setErrorMessage("");
     setStatusMessage("");
 
-    const supabase = getSupabaseBrowserClient();
     const displayName = normalizePlayerName(joinName);
     const roomCode = sanitizeRoomCode(joinCode);
 
@@ -148,17 +247,33 @@ export default function OnlinePage() {
       }
 
       const room = data as OnlineRoom;
-      const { count, error: countError } = await supabase
-        .from("room_players")
-        .select("id", { count: "exact", head: true })
-        .eq("room_id", room.id);
+      const { data: existingPlayer, error: existingPlayerError } =
+        await supabase
+          .from("room_players")
+          .select(
+            "id, room_id, user_id, display_name, is_host, joined_at, last_seen_at",
+          )
+          .eq("room_id", room.id)
+          .eq("user_id", user.id)
+          .maybeSingle();
 
-      if (countError) {
-        throw countError;
+      if (existingPlayerError) {
+        throw existingPlayerError;
       }
 
-      if ((count ?? 0) >= room.max_players) {
-        throw new Error("That room is full.");
+      if (!existingPlayer) {
+        const { count, error: countError } = await supabase
+          .from("room_players")
+          .select("id", { count: "exact", head: true })
+          .eq("room_id", room.id);
+
+        if (countError) {
+          throw countError;
+        }
+
+        if ((count ?? 0) >= room.max_players) {
+          throw new Error("That room is full.");
+        }
       }
 
       const { error: playerError } = await supabase
@@ -175,6 +290,23 @@ export default function OnlinePage() {
       if (playerError) {
         throw playerError;
       }
+
+      const { data: playerRows, error: playersError } = await supabase
+        .from("room_players")
+        .select(
+          "id, room_id, user_id, display_name, is_host, joined_at, last_seen_at",
+        )
+        .eq("room_id", room.id);
+
+      if (playersError) {
+        throw playersError;
+      }
+
+      saveOnlineSessionFromPlayers(
+        room,
+        (playerRows ?? []) as OnlineRoomPlayer[],
+        user.id,
+      );
 
       setStatusMessage(`Joined room ${room.code}.`);
       router.push(`/online/room/${room.code}`);

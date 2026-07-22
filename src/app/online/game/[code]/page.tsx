@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import type { CSSProperties } from "react";
 import type { RealtimeChannel } from "@supabase/supabase-js";
@@ -27,6 +26,14 @@ import {
   type OnlineGameStateRow,
 } from "@/lib/online-game-state";
 import { sanitizeRoomCode, type OnlineRoom } from "@/lib/online-room";
+import {
+  clearOnlineSession,
+  getStoredOnlineSession,
+  isPermanentOnlineSessionError,
+  reconnectOnlineSession,
+  saveOnlineSessionFromGameState,
+  type StoredOnlineSession,
+} from "@/lib/online-session";
 import {
   ensureAnonymousUser,
   getSupabaseBrowserClient,
@@ -97,7 +104,7 @@ function getTransitRent(stationCount: number) {
 
 function getNotFoundMessage(error: { code?: string } | null) {
   return error?.code === "PGRST116"
-    ? "Room not found for this online player."
+    ? "This room no longer exists or your saved seat is no longer available."
     : "";
 }
 
@@ -110,8 +117,11 @@ export default function OnlineGamePage() {
   const [currentUserId, setCurrentUserId] = useState("");
   const [room, setRoom] = useState<OnlineRoom | null>(null);
   const [gameRow, setGameRow] = useState<OnlineGameStateRow | null>(null);
+  const [storedOnlineSession, setStoredOnlineSession] =
+    useState<StoredOnlineSession | null>(null);
   const [errorMessage, setErrorMessage] = useState("");
   const [isLoading, setIsLoading] = useState(isConfigured);
+  const [isReconnecting, setIsReconnecting] = useState(false);
   const [isActing, setIsActing] = useState(false);
 
   const gameState = gameRow?.state ?? null;
@@ -139,6 +149,15 @@ export default function OnlineGamePage() {
   const localPlayer = gameState?.players.find((player) => {
     return player.userId === currentUserId;
   });
+  const localPlayerIndex =
+    gameState?.players.findIndex((player) => player.userId === currentUserId) ??
+    -1;
+  const localSeatNumber =
+    storedOnlineSession?.seatIndex !== undefined
+      ? storedOnlineSession.seatIndex + 1
+      : localPlayerIndex >= 0
+        ? localPlayerIndex + 1
+        : null;
   const isCurrentPlayer =
     currentPlayer !== null && currentPlayer.userId === currentUserId;
   const isHost =
@@ -200,6 +219,9 @@ export default function OnlineGamePage() {
       const notFoundMessage = getNotFoundMessage(error);
 
       if (notFoundMessage) {
+        clearOnlineSession(code);
+        setRoom(null);
+        setGameRow(null);
         throw new Error(notFoundMessage);
       }
 
@@ -212,6 +234,14 @@ export default function OnlineGamePage() {
       }
 
       const loadedRoom = data as OnlineRoom;
+
+      if (loadedRoom.status === "closed") {
+        clearOnlineSession(loadedRoom.code);
+        setRoom(null);
+        setGameRow(null);
+        throw new Error("This online room has been closed.");
+      }
+
       setRoom(loadedRoom);
 
       return loadedRoom;
@@ -266,9 +296,33 @@ export default function OnlineGamePage() {
     async function loadOnlineGame() {
       try {
         setIsLoading(true);
+        setIsReconnecting(true);
         setErrorMessage("");
 
         const user = await ensureAnonymousUser(activeSupabase);
+        const storedSession = getStoredOnlineSession(roomCode);
+
+        if (storedSession) {
+          if (storedSession.userId !== user.id) {
+            clearOnlineSession(roomCode);
+            throw new Error(
+              "Saved online session belongs to another browser profile. Return to the lobby and join again.",
+            );
+          }
+
+          const reconnectedSession = await reconnectOnlineSession(
+            activeSupabase,
+            storedSession,
+          );
+
+          if (reconnectedSession.roomStatus === "closed") {
+            clearOnlineSession(roomCode);
+            throw new Error("This online room has been closed.");
+          }
+
+          setStoredOnlineSession(reconnectedSession);
+        }
+
         const loadedRoom = await loadRoom(roomCode);
 
         if (!loadedRoom || !isActive) {
@@ -282,14 +336,41 @@ export default function OnlineGamePage() {
           return;
         }
 
-        await loadGameState(loadedRoom.id);
+        const loadedGameState = await loadGameState(loadedRoom.id);
+
+        if (!loadedGameState || !isActive) {
+          return;
+        }
+
+        const savedSession = saveOnlineSessionFromGameState(
+          loadedRoom,
+          loadedGameState.state.players,
+          user.id,
+        );
+
+        if (!savedSession) {
+          clearOnlineSession(roomCode);
+          throw new Error(
+            "This browser is not joined to this online game. Return to the lobby and join the room again.",
+          );
+        }
+
+        setStoredOnlineSession(savedSession);
       } catch (error) {
         if (isActive) {
+          if (isPermanentOnlineSessionError(error)) {
+            clearOnlineSession(roomCode);
+            setStoredOnlineSession(null);
+            setRoom(null);
+            setGameRow(null);
+          }
+
           setErrorMessage(getSafeSupabaseErrorMessage(error));
         }
       } finally {
         if (isActive) {
           setIsLoading(false);
+          setIsReconnecting(false);
         }
       }
     }
@@ -318,6 +399,13 @@ export default function OnlineGamePage() {
         },
         () => {
           void loadGameState(room.id).catch((error: unknown) => {
+            if (isPermanentOnlineSessionError(error)) {
+              clearOnlineSession(room.code);
+              setStoredOnlineSession(null);
+              setRoom(null);
+              setGameRow(null);
+            }
+
             setErrorMessage(getSafeSupabaseErrorMessage(error));
           });
         },
@@ -332,6 +420,13 @@ export default function OnlineGamePage() {
         },
         () => {
           void loadRoom(room.code).catch((error: unknown) => {
+            if (isPermanentOnlineSessionError(error)) {
+              clearOnlineSession(room.code);
+              setStoredOnlineSession(null);
+              setRoom(null);
+              setGameRow(null);
+            }
+
             setErrorMessage(getSafeSupabaseErrorMessage(error));
           });
         },
@@ -348,6 +443,16 @@ export default function OnlineGamePage() {
       router.replace(`/online/room/${room.code}`);
     }
   }, [room, router]);
+
+  function exitGame() {
+    clearOnlineSession(room?.code ?? roomCode);
+    router.push("/");
+  }
+
+  function returnToLobby() {
+    clearOnlineSession(room?.code ?? roomCode);
+    router.push("/online");
+  }
 
   async function rollDice() {
     if (!supabase || !room || !gameRow || !canRoll) {
@@ -790,7 +895,7 @@ export default function OnlineGamePage() {
             </div>
           ) : isLoading ? (
             <p className="border-2 border-[#171915] bg-white/90 p-4 text-sm font-black shadow-[6px_6px_0_0_#f9c74f]">
-              Loading online game
+              {isReconnecting ? "Reconnecting..." : "Loading online game"}
             </p>
           ) : errorMessage && !gameState ? (
             <div className="border-2 border-[#171915] bg-[#ffedf2] p-4 shadow-[8px_8px_0_0_#ef476f]">
@@ -798,12 +903,13 @@ export default function OnlineGamePage() {
               <p className="mt-3 text-sm font-bold leading-6 text-[#445045]">
                 {errorMessage}
               </p>
-              <Link
+              <button
                 className="mt-5 inline-flex h-12 items-center justify-center border-2 border-[#171915] bg-[#171915] px-6 text-sm font-bold text-white shadow-[5px_5px_0_0_#f9c74f] transition-transform hover:-translate-y-0.5 focus:outline-none focus:ring-4 focus:ring-[#f9c74f]/45"
-                href="/online"
+                onClick={returnToLobby}
+                type="button"
               >
-                Back to Online
-              </Link>
+                Return to Lobby
+              </button>
             </div>
           ) : gameState ? (
             <div className="overflow-x-auto pb-4">
@@ -1004,8 +1110,15 @@ export default function OnlineGamePage() {
                   Your Seat
                 </p>
                 <p className="break-words text-base font-black">
-                  {localPlayer?.name ?? "Not joined"}
+                  {localPlayer?.name ??
+                    storedOnlineSession?.displayName ??
+                    "Not joined"}
                 </p>
+                {localSeatNumber ? (
+                  <p className="mt-1 text-xs font-black uppercase text-[#596057]">
+                    Seat {localSeatNumber}
+                  </p>
+                ) : null}
               </div>
               <p className="text-sm font-bold leading-6 text-[#445045]">
                 {winnerPlayer
@@ -1063,12 +1176,13 @@ export default function OnlineGamePage() {
               </button>
             ) : null}
 
-            <Link
-              className="flex h-14 items-center justify-center border-2 border-[#171915] bg-[#ef476f] px-6 text-base font-bold text-white shadow-[8px_8px_0_0_#171915] transition-transform hover:-translate-y-0.5 focus:outline-none focus:ring-4 focus:ring-[#ef476f]/35"
-              href="/"
+            <button
+              className="h-14 border-2 border-[#171915] bg-[#ef476f] px-6 text-base font-bold text-white shadow-[8px_8px_0_0_#171915] transition-transform hover:-translate-y-0.5 focus:outline-none focus:ring-4 focus:ring-[#ef476f]/35"
+              onClick={exitGame}
+              type="button"
             >
               Exit Game
-            </Link>
+            </button>
           </div>
 
           <p className="border-2 border-[#171915] bg-white/90 p-3 text-sm font-bold text-[#445045] shadow-[5px_5px_0_0_#43aa8b]">

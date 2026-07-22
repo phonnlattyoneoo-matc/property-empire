@@ -14,14 +14,22 @@ import {
   MAX_ONLINE_PLAYERS,
   MIN_ONLINE_PLAYERS,
   sanitizeRoomCode,
+  sortOnlineRoomPlayers,
   type OnlineRoom,
   type OnlineRoomPlayer,
 } from "@/lib/online-room";
+import {
+  clearOnlineSession,
+  getStoredOnlineSession,
+  isPermanentOnlineSessionError,
+  reconnectOnlineSession,
+  saveOnlineSessionFromPlayers,
+} from "@/lib/online-session";
 
-function sortPlayers(players: OnlineRoomPlayer[]) {
-  return [...players].sort((firstPlayer, secondPlayer) => {
-    return firstPlayer.joined_at.localeCompare(secondPlayer.joined_at);
-  });
+function getRoomNotFoundMessage(error: { code?: string } | null) {
+  return error?.code === "PGRST116"
+    ? "This room no longer exists or is not available."
+    : "";
 }
 
 export default function OnlineRoomPage() {
@@ -35,6 +43,7 @@ export default function OnlineRoomPage() {
   const [players, setPlayers] = useState<OnlineRoomPlayer[]>([]);
   const [errorMessage, setErrorMessage] = useState("");
   const [isLoading, setIsLoading] = useState(isConfigured);
+  const [isReconnecting, setIsReconnecting] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
 
   const currentPlayer = players.find((player) => {
@@ -60,14 +69,22 @@ export default function OnlineRoomPage() {
 
       const { data, error } = await supabase
         .from("room_players")
-        .select("id, room_id, user_id, display_name, is_host, joined_at")
+        .select(
+          "id, room_id, user_id, display_name, is_host, joined_at, last_seen_at",
+        )
         .eq("room_id", roomId);
 
       if (error) {
         throw error;
       }
 
-      setPlayers(sortPlayers((data ?? []) as OnlineRoomPlayer[]));
+      const sortedPlayers = sortOnlineRoomPlayers(
+        (data ?? []) as OnlineRoomPlayer[],
+      );
+
+      setPlayers(sortedPlayers);
+
+      return sortedPlayers;
     },
     [supabase],
   );
@@ -84,6 +101,13 @@ export default function OnlineRoomPage() {
         .eq("code", code)
         .single();
 
+      const notFoundMessage = getRoomNotFoundMessage(error);
+
+      if (notFoundMessage) {
+        clearOnlineSession(code);
+        throw new Error(notFoundMessage);
+      }
+
       if (error) {
         throw error;
       }
@@ -93,6 +117,12 @@ export default function OnlineRoomPage() {
       }
 
       const loadedRoom = data as OnlineRoom;
+
+      if (loadedRoom.status === "closed") {
+        clearOnlineSession(loadedRoom.code);
+        throw new Error("This online room has been closed.");
+      }
+
       setRoom(loadedRoom);
 
       return loadedRoom;
@@ -111,9 +141,31 @@ export default function OnlineRoomPage() {
     async function loadLobby() {
       try {
         setIsLoading(true);
+        setIsReconnecting(true);
         setErrorMessage("");
 
         const user = await ensureAnonymousUser(activeSupabase);
+        const storedSession = getStoredOnlineSession(roomCode);
+
+        if (storedSession) {
+          if (storedSession.userId !== user.id) {
+            clearOnlineSession(roomCode);
+            throw new Error(
+              "Saved online session belongs to another browser profile. Return to the lobby and join again.",
+            );
+          }
+
+          const reconnectedSession = await reconnectOnlineSession(
+            activeSupabase,
+            storedSession,
+          );
+
+          if (reconnectedSession.roomStatus === "closed") {
+            clearOnlineSession(roomCode);
+            throw new Error("This online room has been closed.");
+          }
+        }
+
         const loadedRoom = await loadRoom(roomCode);
 
         if (!loadedRoom || !isActive) {
@@ -121,14 +173,23 @@ export default function OnlineRoomPage() {
         }
 
         setCurrentUserId(user.id);
-        await loadPlayers(loadedRoom.id);
+        const loadedPlayers = await loadPlayers(loadedRoom.id);
+
+        if (loadedPlayers) {
+          saveOnlineSessionFromPlayers(loadedRoom, loadedPlayers, user.id);
+        }
       } catch (error) {
         if (isActive) {
+          if (isPermanentOnlineSessionError(error)) {
+            clearOnlineSession(roomCode);
+          }
+
           setErrorMessage(getSafeSupabaseErrorMessage(error));
         }
       } finally {
         if (isActive) {
           setIsLoading(false);
+          setIsReconnecting(false);
         }
       }
     }
@@ -210,6 +271,16 @@ export default function OnlineRoomPage() {
     }
   }
 
+  function exitLobby() {
+    clearOnlineSession(room?.code ?? roomCode);
+    router.push("/");
+  }
+
+  function returnToLobby() {
+    clearOnlineSession(room?.code ?? roomCode);
+    router.push("/online");
+  }
+
   return (
     <main className="relative min-h-screen overflow-hidden bg-[#f7f8f4] px-5 py-8 text-[#171915] sm:px-8 sm:py-12">
       <div
@@ -251,12 +322,22 @@ export default function OnlineRoomPage() {
               </div>
             ) : isLoading ? (
               <p className="border-2 border-[#171915] bg-[#f7f8f4] p-4 text-sm font-black">
-                Loading lobby
+                {isReconnecting ? "Reconnecting..." : "Loading lobby"}
               </p>
             ) : errorMessage ? (
-              <p className="border-2 border-[#171915] bg-[#ffedf2] p-4 text-sm font-bold text-[#171915]">
-                {errorMessage}
-              </p>
+              <div className="border-2 border-[#171915] bg-[#ffedf2] p-4">
+                <h2 className="text-2xl font-black">Lobby Unavailable</h2>
+                <p className="mt-3 text-sm font-bold leading-6 text-[#445045]">
+                  {errorMessage}
+                </p>
+                <button
+                  className="mt-5 inline-flex h-12 items-center justify-center border-2 border-[#171915] bg-[#171915] px-6 text-sm font-bold text-white shadow-[5px_5px_0_0_#f9c74f] transition-transform hover:-translate-y-0.5 focus:outline-none focus:ring-4 focus:ring-[#f9c74f]/45"
+                  onClick={returnToLobby}
+                  type="button"
+                >
+                  Return to Lobby
+                </button>
+              </div>
             ) : room ? (
               <>
                 <div className="grid gap-4 sm:grid-cols-[1fr_auto] sm:items-start">
@@ -325,12 +406,13 @@ export default function OnlineRoomPage() {
                     </button>
                   )}
 
-                  <Link
-                    className="flex h-14 items-center justify-center border-2 border-[#171915] bg-[#ef476f] px-6 text-base font-bold text-white shadow-[8px_8px_0_0_#171915] transition-transform hover:-translate-y-0.5 focus:outline-none focus:ring-4 focus:ring-[#ef476f]/35"
-                    href="/"
+                  <button
+                    className="h-14 border-2 border-[#171915] bg-[#ef476f] px-6 text-base font-bold text-white shadow-[8px_8px_0_0_#171915] transition-transform hover:-translate-y-0.5 focus:outline-none focus:ring-4 focus:ring-[#ef476f]/35"
+                    onClick={exitLobby}
+                    type="button"
                   >
                     Exit Lobby
-                  </Link>
+                  </button>
                 </div>
 
                 {room.status === "started" ? (

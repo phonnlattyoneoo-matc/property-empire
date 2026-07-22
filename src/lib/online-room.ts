@@ -18,6 +18,7 @@ export type OnlineRoomPlayer = {
   id: string;
   is_host: boolean;
   joined_at: string;
+  last_seen_at: string;
   room_id: string;
   user_id: string;
 };
@@ -44,4 +45,18 @@ export function normalizePlayerName(value: string) {
 
 export function isValidRoomCode(value: string) {
   return /^[A-Z0-9]{6}$/.test(value);
+}
+
+export function sortOnlineRoomPlayers(players: OnlineRoomPlayer[]) {
+  return [...players].sort((firstPlayer, secondPlayer) => {
+    const joinedAtComparison = firstPlayer.joined_at.localeCompare(
+      secondPlayer.joined_at,
+    );
+
+    if (joinedAtComparison !== 0) {
+      return joinedAtComparison;
+    }
+
+    return firstPlayer.id.localeCompare(secondPlayer.id);
+  });
 }
