@@ -1102,7 +1102,7 @@ export default function GamePage() {
     !currentPlayer.isEliminated;
 
   return (
-    <main className="relative min-h-screen overflow-hidden bg-[#f7f8f4] px-4 py-6 text-[#171915] sm:px-8 sm:py-8">
+    <main className="game-screen relative min-h-screen overflow-hidden bg-[#f7f8f4] px-4 py-6 text-[#171915] sm:px-8 sm:py-8">
       <div
         aria-hidden="true"
         className="absolute inset-0 bg-[linear-gradient(90deg,rgba(23,25,21,0.05)_1px,transparent_1px),linear-gradient(rgba(23,25,21,0.05)_1px,transparent_1px)] bg-[size:44px_44px]"
@@ -1113,19 +1113,19 @@ export default function GamePage() {
         className="absolute -left-40 top-20 h-[440px] w-[440px] rotate-45 border-[16px] border-[#171915] opacity-[0.04]"
       />
 
-      <section className="relative z-10 mx-auto grid w-full max-w-7xl gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
-        <div>
-          <div className="mb-5 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+      <section className="game-shell relative z-10 mx-auto grid w-full max-w-7xl gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
+        <div className="game-board-column">
+          <div className="game-header mb-5 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
             <div>
               <p
-                className="mb-4 h-1.5 w-24 bg-[#ef476f]"
+                className="game-title-accent mb-4 h-1.5 w-24 bg-[#ef476f]"
                 aria-hidden="true"
               />
-              <h1 className="text-4xl font-black tracking-normal sm:text-6xl">
+              <h1 className="game-title text-4xl font-black tracking-normal sm:text-6xl">
                 Property Empire
               </h1>
             </div>
-            <p className="w-fit border-2 border-[#171915] bg-white px-4 py-2 text-sm font-black shadow-[5px_5px_0_0_#43aa8b]">
+            <p className="game-status-pill w-fit border-2 border-[#171915] bg-white px-4 py-2 text-sm font-black shadow-[5px_5px_0_0_#43aa8b]">
               {winnerPlayer
                 ? `Winner: ${winnerPlayer.name}`
                 : `Current: ${currentPlayer.name}`}
@@ -1134,14 +1134,14 @@ export default function GamePage() {
 
           {winnerPlayer ? (
             <div
-              className="mb-6 border-2 border-[#171915] bg-[#171915] p-6 text-white shadow-[12px_12px_0_0_#f9c74f] sm:p-8"
+              className="game-action-panel game-winner-panel game-shadow-yellow mb-6 border-2 border-[#171915] bg-[#171915] p-6 text-white shadow-[12px_12px_0_0_#f9c74f] sm:p-8"
               data-testid="winner-panel"
             >
               <p
-                className="mb-4 h-1.5 w-24 bg-[#06d6a0]"
+                className="game-title-accent mb-4 h-1.5 w-24 bg-[#06d6a0]"
                 aria-hidden="true"
               />
-              <h2 className="text-4xl font-black tracking-normal sm:text-6xl">
+              <h2 className="game-title text-4xl font-black tracking-normal sm:text-6xl">
                 {winnerPlayer.name} Wins
               </h2>
               <p className="mt-4 text-lg font-bold text-[#f7f8f4] sm:text-2xl">
@@ -1157,8 +1157,8 @@ export default function GamePage() {
             </div>
           ) : null}
 
-          <div className="overflow-x-auto pb-4">
-            <div className="grid aspect-square min-w-[620px] grid-cols-7 grid-rows-7 border-2 border-[#171915] bg-[#171915] shadow-[12px_12px_0_0_#f9c74f]">
+          <div className="game-board-scroll overflow-x-auto pb-4">
+            <div className="game-board grid aspect-square min-w-[620px] grid-cols-7 grid-rows-7 border-2 border-[#171915] bg-[#171915] shadow-[12px_12px_0_0_#f9c74f]">
               {boardSpaces.map((space, index) => {
                 const styles = spaceStyles[space.type];
                 const spaceOwner = isBuyableSpace(space)
@@ -1175,7 +1175,7 @@ export default function GamePage() {
 
                 return (
                   <div
-                    className="relative flex min-h-0 flex-col justify-between border border-[#171915] p-1.5 text-[#171915]"
+                    className="game-board-space relative flex min-h-0 flex-col justify-between border border-[#171915] p-1.5 text-[#171915]"
                     data-testid={`board-space-${index}`}
                     key={space.name}
                     style={{
@@ -1185,35 +1185,35 @@ export default function GamePage() {
                   >
                     <span
                       aria-hidden="true"
-                      className="absolute inset-x-0 top-0 h-1.5"
+                      className="game-board-accent absolute inset-x-0 top-0 h-1.5"
                       style={{ backgroundColor: styles.accent }}
                     />
-                    <span className="pt-2 text-[0.66rem] font-black uppercase leading-tight sm:text-xs">
+                    <span className="game-board-space-name pt-2 text-[0.66rem] font-black uppercase leading-tight sm:text-xs">
                       {space.name}
                     </span>
-                    <span className="text-[0.52rem] font-bold uppercase leading-tight text-[#596057] sm:text-[0.62rem]">
+                    <span className="game-board-space-label text-[0.52rem] font-bold uppercase leading-tight text-[#596057] sm:text-[0.62rem]">
                       {styles.label}
                     </span>
 
                     {isBuyableSpace(space) && spaceOwner ? (
                       <div className="mt-1 space-y-0.5">
                         <span
-                          className="block truncate border border-[#171915] px-1 py-0.5 text-[0.5rem] font-black uppercase leading-tight text-white sm:text-[0.58rem]"
+                          className="game-board-space-meta block truncate border border-[#171915] px-1 py-0.5 text-[0.5rem] font-black uppercase leading-tight text-white sm:text-[0.58rem]"
                           title={`Owner: ${spaceOwner.name}`}
                           style={{ backgroundColor: spaceOwner.color }}
                         >
                           Owner: {spaceOwner.name}
                         </span>
                         {isPurchasableProperty(space) ? (
-                          <span className="block text-[0.5rem] font-black leading-tight text-[#445045] sm:text-[0.58rem]">
+                          <span className="game-board-space-meta block text-[0.5rem] font-black leading-tight text-[#445045] sm:text-[0.58rem]">
                             Rent {formatCurrency(space.rent)}
                           </span>
                         ) : (
                           <>
-                            <span className="block text-[0.5rem] font-black leading-tight text-[#445045] sm:text-[0.58rem]">
+                            <span className="game-board-space-meta block text-[0.5rem] font-black leading-tight text-[#445045] sm:text-[0.58rem]">
                               Price {formatCurrency(space.price)}
                             </span>
-                            <span className="block text-[0.5rem] font-black leading-tight text-[#445045] sm:text-[0.58rem]">
+                            <span className="game-board-space-meta block text-[0.5rem] font-black leading-tight text-[#445045] sm:text-[0.58rem]">
                               Rent{" "}
                               {formatCurrency(
                                 getTransitRent(spaceOwnerTransitCount),
@@ -1223,7 +1223,7 @@ export default function GamePage() {
                         )}
                       </div>
                     ) : isPurchasableProperty(space) ? (
-                      <div className="mt-1 text-[0.55rem] font-black leading-tight text-[#445045] sm:text-[0.62rem]">
+                      <div className="game-board-space-meta mt-1 text-[0.55rem] font-black leading-tight text-[#445045] sm:text-[0.62rem]">
                         <span className="block">
                           Price {formatCurrency(space.price)}
                         </span>
@@ -1232,7 +1232,7 @@ export default function GamePage() {
                         </span>
                       </div>
                     ) : isPurchasableTransit(space) ? (
-                      <div className="mt-1 text-[0.55rem] font-black leading-tight text-[#445045] sm:text-[0.62rem]">
+                      <div className="game-board-space-meta mt-1 text-[0.55rem] font-black leading-tight text-[#445045] sm:text-[0.62rem]">
                         <span className="block">
                           Price {formatCurrency(space.price)}
                         </span>
@@ -1241,7 +1241,7 @@ export default function GamePage() {
                         </span>
                       </div>
                     ) : isTaxSpace(space) ? (
-                      <div className="mt-1 text-[0.55rem] font-black leading-tight text-[#445045] sm:text-[0.62rem]">
+                      <div className="game-board-space-meta mt-1 text-[0.55rem] font-black leading-tight text-[#445045] sm:text-[0.62rem]">
                         Pay {formatCurrency(space.taxAmount)}
                       </div>
                     ) : null}
@@ -1251,7 +1251,7 @@ export default function GamePage() {
                         {playersOnSpace.map((player) => (
                           <span
                             aria-label={`${player.name} token`}
-                            className="h-4 w-4 rounded-full border-2 border-[#171915] sm:h-5 sm:w-5"
+                            className="game-board-token h-4 w-4 rounded-full border-2 border-[#171915] sm:h-5 sm:w-5"
                             key={player.id}
                             style={{ backgroundColor: player.color }}
                           />
@@ -1263,17 +1263,17 @@ export default function GamePage() {
               })}
 
               <div
-                className="flex flex-col items-center justify-center border-2 border-[#171915] bg-[#171915] p-6 text-center text-white"
+                className="game-board-center flex flex-col items-center justify-center border-2 border-[#171915] bg-[#171915] p-6 text-center text-white"
                 style={{ gridColumn: "2 / 7", gridRow: "2 / 7" }}
               >
                 <p
-                  className="mb-4 h-1.5 w-24 bg-[#ef476f]"
+                  className="game-board-center-accent mb-4 h-1.5 w-24 bg-[#ef476f]"
                   aria-hidden="true"
                 />
-                <h2 className="text-4xl font-black tracking-normal sm:text-6xl">
+                <h2 className="game-board-center-title text-4xl font-black tracking-normal sm:text-6xl">
                   City Launch
                 </h2>
-                <p className="mt-4 max-w-md text-base font-bold leading-7 text-[#f7f8f4] sm:text-lg">
+                <p className="game-board-center-copy mt-4 max-w-md text-base font-bold leading-7 text-[#f7f8f4] sm:text-lg">
                   Pass or land on Grand Plaza to collect{" "}
                   {formatCurrency(CITY_LAUNCH_BONUS)}.
                 </p>
@@ -1282,11 +1282,11 @@ export default function GamePage() {
           </div>
         </div>
 
-        <aside className="space-y-5">
-          <div className="border-2 border-[#171915] bg-white/90 p-4 shadow-[8px_8px_0_0_#06d6a0] backdrop-blur">
-            <h2 className="text-2xl font-black">Players</h2>
+        <aside className="game-sidebar space-y-5">
+          <div className="game-panel game-players-panel game-shadow-green border-2 border-[#171915] bg-white/90 p-4 shadow-[8px_8px_0_0_#06d6a0] backdrop-blur">
+            <h2 className="game-panel-title text-2xl font-black">Players</h2>
 
-            <div className="mt-4 space-y-3">
+            <div className="game-players-list mt-4 space-y-3">
               {gameState.players.map((player, playerIndex) => {
                 const isCurrentActivePlayer =
                   !winnerPlayer &&
@@ -1295,7 +1295,7 @@ export default function GamePage() {
 
                 return (
                   <div
-                    className={`flex items-center gap-3 border-2 border-[#171915] p-3 ${
+                    className={`game-player-card flex items-center gap-3 border-2 border-[#171915] p-3 ${
                       player.isEliminated
                         ? "bg-[#e7e8e1] opacity-80"
                         : isCurrentActivePlayer
@@ -1307,7 +1307,7 @@ export default function GamePage() {
                   >
                     <span
                       aria-hidden="true"
-                      className="h-6 w-6 shrink-0 rounded-full border-2 border-[#171915]"
+                      className="game-player-token h-6 w-6 shrink-0 rounded-full border-2 border-[#171915]"
                       style={{
                         backgroundColor: player.isEliminated
                           ? "#c6cbbf"
@@ -1315,29 +1315,29 @@ export default function GamePage() {
                       }}
                     />
                     <div className="min-w-0 flex-1">
-                      <p className="break-words text-base font-black">
+                      <p className="game-player-name break-words text-base font-black">
                         {player.name}
                       </p>
-                      <p className="text-sm font-bold text-[#445045]">
+                      <p className="game-player-meta text-sm font-bold text-[#445045]">
                         {formatCurrency(player.balance)}
                       </p>
                       {player.isEliminated ? (
-                        <p className="mt-1 text-xs font-black uppercase text-[#ef476f]">
+                        <p className="game-player-meta mt-1 text-xs font-black uppercase text-[#ef476f]">
                           Bankrupt
                         </p>
                       ) : player.balance < 0 ? (
-                        <p className="mt-1 text-xs font-black uppercase text-[#ef476f]">
+                        <p className="game-player-meta mt-1 text-xs font-black uppercase text-[#ef476f]">
                           Negative balance
                         </p>
                       ) : null}
                       {player.isDetained && !player.isEliminated ? (
-                        <p className="mt-1 text-xs font-black uppercase text-[#171915]">
+                        <p className="game-player-meta mt-1 text-xs font-black uppercase text-[#171915]">
                           Detained
                         </p>
                       ) : null}
                     </div>
                     {isCurrentActivePlayer ? (
-                      <span className="border-2 border-[#171915] bg-white px-2 py-1 text-[0.62rem] font-black uppercase">
+                      <span className="game-status-badge border-2 border-[#171915] bg-white px-2 py-1 text-[0.62rem] font-black uppercase">
                         Current
                       </span>
                     ) : null}
@@ -1347,23 +1347,23 @@ export default function GamePage() {
             </div>
           </div>
 
-          <div className="border-2 border-[#171915] bg-white/90 p-4 shadow-[8px_8px_0_0_#f9c74f] backdrop-blur">
-            <h2 className="text-2xl font-black">Dice</h2>
+          <div className="game-panel game-dice-panel game-shadow-yellow border-2 border-[#171915] bg-white/90 p-4 shadow-[8px_8px_0_0_#f9c74f] backdrop-blur">
+            <h2 className="game-panel-title text-2xl font-black">Dice</h2>
 
-            <div className="mt-4 grid grid-cols-3 gap-3">
-              <div className="flex aspect-square items-center justify-center border-2 border-[#171915] bg-[#f7f8f4] text-3xl font-black">
+            <div className="game-dice-grid mt-4 grid grid-cols-3 gap-3">
+              <div className="game-dice-cell flex aspect-square items-center justify-center border-2 border-[#171915] bg-[#f7f8f4] text-3xl font-black">
                 {gameState.lastRoll?.dieOne ?? "-"}
               </div>
-              <div className="flex aspect-square items-center justify-center border-2 border-[#171915] bg-[#f7f8f4] text-3xl font-black">
+              <div className="game-dice-cell flex aspect-square items-center justify-center border-2 border-[#171915] bg-[#f7f8f4] text-3xl font-black">
                 {gameState.lastRoll?.dieTwo ?? "-"}
               </div>
-              <div className="flex aspect-square items-center justify-center border-2 border-[#171915] bg-[#171915] text-3xl font-black text-white">
+              <div className="game-dice-cell flex aspect-square items-center justify-center border-2 border-[#171915] bg-[#171915] text-3xl font-black text-white">
                 {gameState.lastRoll?.total ?? "-"}
               </div>
             </div>
 
             <p
-              className="mt-4 border-2 border-[#171915] bg-[#f7f8f4] p-3 text-sm font-bold leading-6 text-[#445045]"
+              className="game-message mt-4 border-2 border-[#171915] bg-[#f7f8f4] p-3 text-sm font-bold leading-6 text-[#445045]"
               data-testid="game-message"
             >
               {gameState.message}
@@ -1372,7 +1372,7 @@ export default function GamePage() {
 
           {gameState.lastEventCard ? (
             <div
-              className="border-2 border-[#171915] bg-white/90 p-4 shadow-[8px_8px_0_0_#f8961e] backdrop-blur"
+              className="game-panel game-action-panel game-shadow-orange border-2 border-[#171915] bg-white/90 p-4 shadow-[8px_8px_0_0_#f8961e] backdrop-blur"
               data-testid="event-panel"
             >
               <h2 className="text-2xl font-black">Event</h2>
@@ -1404,7 +1404,7 @@ export default function GamePage() {
           ) : null}
 
           {showPurchasePanel && landedSpace && isBuyableSpace(landedSpace) ? (
-            <div className="border-2 border-[#171915] bg-white/90 p-4 shadow-[8px_8px_0_0_#3454d1] backdrop-blur">
+            <div className="game-panel game-action-panel game-shadow-blue border-2 border-[#171915] bg-white/90 p-4 shadow-[8px_8px_0_0_#3454d1] backdrop-blur">
               <h2 className="text-2xl font-black">
                 {isPurchasableTransit(landedSpace) ? "Transit" : "Property"}
               </h2>
@@ -1496,7 +1496,7 @@ export default function GamePage() {
 
           {isBankruptcyPending ? (
             <div
-              className="border-2 border-[#171915] bg-[#ffedf2] p-4 shadow-[8px_8px_0_0_#ef476f]"
+              className="game-panel game-warning-panel game-shadow-red border-2 border-[#171915] bg-[#ffedf2] p-4 shadow-[8px_8px_0_0_#ef476f]"
               data-testid="bankruptcy-warning"
             >
               <h2 className="text-2xl font-black">Bankruptcy Warning</h2>
@@ -1508,7 +1508,7 @@ export default function GamePage() {
             </div>
           ) : null}
 
-          <div className="grid gap-4 sm:grid-cols-3 xl:grid-cols-1">
+          <div className="game-buttons grid gap-4 sm:grid-cols-3 xl:grid-cols-1">
             <button
               className="h-14 border-2 border-[#171915] bg-[#3454d1] px-6 text-base font-bold text-white shadow-[8px_8px_0_0_#171915] transition-transform hover:-translate-y-0.5 focus:outline-none focus:ring-4 focus:ring-[#3454d1]/35 disabled:cursor-not-allowed disabled:bg-[#596057] disabled:opacity-55 disabled:shadow-none"
               disabled={
@@ -1557,7 +1557,7 @@ export default function GamePage() {
             </button>
           </div>
 
-          <p className="border-2 border-[#171915] bg-white/90 p-3 text-sm font-bold text-[#445045] shadow-[5px_5px_0_0_#43aa8b]">
+          <p className="game-footer border-2 border-[#171915] bg-white/90 p-3 text-sm font-bold text-[#445045] shadow-[5px_5px_0_0_#43aa8b]">
             All players began with {formatCurrency(STARTING_BALANCE)} at Grand
             Plaza.
           </p>
