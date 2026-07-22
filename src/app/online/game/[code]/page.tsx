@@ -140,6 +140,13 @@ function formatTurnTimer(remainingSeconds: number | null) {
   return `${minutes}:${seconds.toString().padStart(2, "0")}`;
 }
 
+function formatActivityTime(value: string) {
+  return new Intl.DateTimeFormat("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(new Date(value));
+}
+
 function isExpectedTimerExpirationRace(error: unknown) {
   const message =
     error instanceof Error
@@ -1323,6 +1330,37 @@ export default function OnlineGamePage() {
               ) : (
                 <p className="border-2 border-[#171915] bg-[#f7f8f4] p-3 text-sm font-bold">
                   Waiting for game state
+                </p>
+              )}
+            </div>
+          </div>
+
+          <div className="border-2 border-[#171915] bg-white/90 p-4 shadow-[8px_8px_0_0_#3454d1] backdrop-blur">
+            <h2 className="text-2xl font-black">Game Activity</h2>
+
+            <div className="mt-4 max-h-[420px] space-y-3 overflow-y-auto pr-1">
+              {gameState && gameState.activityLog.length > 0 ? (
+                gameState.activityLog.map((entry) => (
+                  <div
+                    className="border-2 border-[#171915] bg-[#f7f8f4] p-3"
+                    key={entry.id}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <p className="break-words text-sm font-black">
+                        {entry.playerName}
+                      </p>
+                      <p className="shrink-0 text-xs font-black uppercase text-[#596057]">
+                        {formatActivityTime(entry.createdAt)}
+                      </p>
+                    </div>
+                    <p className="mt-2 text-sm font-bold leading-6 text-[#445045]">
+                      {entry.message}
+                    </p>
+                  </div>
+                ))
+              ) : (
+                <p className="border-2 border-[#171915] bg-[#f7f8f4] p-3 text-sm font-bold">
+                  Waiting for activity
                 </p>
               )}
             </div>

@@ -33,7 +33,16 @@ export type OnlineResolvedEventCard = {
 
 export type OnlinePropertyOwners = Record<string, string>;
 
+export type OnlineActivityLogEntry = {
+  createdAt: string;
+  id: string;
+  message: string;
+  playerName: string;
+  type: string;
+};
+
 export type OnlineGameState = {
+  activityLog: OnlineActivityLogEntry[];
   boardSpaceCount: number;
   currentPlayerIndex: number;
   hasRolledThisTurn: boolean;
@@ -138,6 +147,7 @@ function parseOnlineGameState(state: unknown): OnlineGameState | null {
     state.propertyOwners,
     players,
   );
+  const activityLog = parseOnlineActivityLog(state.activityLog);
   const winnerPlayerId = parseWinnerPlayerId(state.winnerPlayerId, players);
   const turnDeadlineAt = parseTurnDeadlineAt(state.turnDeadlineAt);
   const pendingPropertyPurchasePosition =
@@ -149,6 +159,7 @@ function parseOnlineGameState(state: unknown): OnlineGameState | null {
     lastRoll === undefined ||
     lastEventCard === undefined ||
     !propertyOwners ||
+    !activityLog ||
     winnerPlayerId === undefined ||
     turnDeadlineAt === undefined ||
     pendingPropertyPurchasePosition === undefined
@@ -193,6 +204,7 @@ function parseOnlineGameState(state: unknown): OnlineGameState | null {
   }
 
   return {
+    activityLog,
     boardSpaceCount: BOARD_SPACE_COUNT,
     currentPlayerIndex: state.currentPlayerIndex,
     hasRolledThisTurn: state.hasRolledThisTurn,
@@ -340,6 +352,51 @@ function parseOnlinePropertyOwners(
   }
 
   return parsedPropertyOwners;
+}
+
+function parseOnlineActivityLog(
+  activityLog: unknown,
+): OnlineActivityLogEntry[] | null {
+  if (activityLog === undefined) {
+    return [];
+  }
+
+  if (!Array.isArray(activityLog) || activityLog.length > 25) {
+    return null;
+  }
+
+  const parsedActivityLog: OnlineActivityLogEntry[] = [];
+
+  for (const entry of activityLog) {
+    if (!isRecord(entry)) {
+      return null;
+    }
+
+    if (
+      typeof entry.id !== "string" ||
+      entry.id.trim().length === 0 ||
+      typeof entry.createdAt !== "string" ||
+      !Number.isFinite(Date.parse(entry.createdAt)) ||
+      typeof entry.playerName !== "string" ||
+      entry.playerName.trim().length === 0 ||
+      typeof entry.message !== "string" ||
+      entry.message.trim().length === 0 ||
+      typeof entry.type !== "string" ||
+      entry.type.trim().length === 0
+    ) {
+      return null;
+    }
+
+    parsedActivityLog.push({
+      createdAt: entry.createdAt,
+      id: entry.id,
+      message: entry.message.trim(),
+      playerName: entry.playerName.trim(),
+      type: entry.type.trim(),
+    });
+  }
+
+  return parsedActivityLog;
 }
 
 function parseWinnerPlayerId(
