@@ -19,17 +19,34 @@ import {
   type OnlineRoomPlayer,
 } from "@/lib/online-room";
 import {
+  ONLINE_HEARTBEAT_INTERVAL_MS,
   clearOnlineSession,
+  getOnlineConnectionStatus,
   getStoredOnlineSession,
+  heartbeatOnlineSession,
   isPermanentOnlineSessionError,
   reconnectOnlineSession,
   saveOnlineSessionFromPlayers,
+  type OnlineConnectionStatus,
+  type StoredOnlineSession,
 } from "@/lib/online-session";
 
 function getRoomNotFoundMessage(error: { code?: string } | null) {
   return error?.code === "PGRST116"
     ? "This room no longer exists or is not available."
     : "";
+}
+
+function getConnectionStatusClassName(status: OnlineConnectionStatus) {
+  if (status === "Connected") {
+    return "bg-[#e7fbf4] text-[#171915]";
+  }
+
+  if (status === "Reconnecting") {
+    return "bg-[#fff1de] text-[#171915]";
+  }
+
+  return "bg-[#ffedf2] text-[#171915]";
 }
 
 export default function OnlineRoomPage() {
@@ -41,6 +58,9 @@ export default function OnlineRoomPage() {
   const [currentUserId, setCurrentUserId] = useState("");
   const [room, setRoom] = useState<OnlineRoom | null>(null);
   const [players, setPlayers] = useState<OnlineRoomPlayer[]>([]);
+  const [storedOnlineSession, setStoredOnlineSession] =
+    useState<StoredOnlineSession | null>(null);
+  const [presenceNowMs, setPresenceNowMs] = useState(() => Date.now());
   const [errorMessage, setErrorMessage] = useState("");
   const [isLoading, setIsLoading] = useState(isConfigured);
   const [isReconnecting, setIsReconnecting] = useState(false);
@@ -164,6 +184,8 @@ export default function OnlineRoomPage() {
             clearOnlineSession(roomCode);
             throw new Error("This online room has been closed.");
           }
+
+          setStoredOnlineSession(reconnectedSession);
         }
 
         const loadedRoom = await loadRoom(roomCode);
@@ -176,12 +198,19 @@ export default function OnlineRoomPage() {
         const loadedPlayers = await loadPlayers(loadedRoom.id);
 
         if (loadedPlayers) {
-          saveOnlineSessionFromPlayers(loadedRoom, loadedPlayers, user.id);
+          const savedSession = saveOnlineSessionFromPlayers(
+            loadedRoom,
+            loadedPlayers,
+            user.id,
+          );
+
+          setStoredOnlineSession(savedSession);
         }
       } catch (error) {
         if (isActive) {
           if (isPermanentOnlineSessionError(error)) {
             clearOnlineSession(roomCode);
+            setStoredOnlineSession(null);
           }
 
           setErrorMessage(getSafeSupabaseErrorMessage(error));
@@ -202,6 +231,71 @@ export default function OnlineRoomPage() {
   }, [isConfigured, loadPlayers, loadRoom, roomCode, supabase]);
 
   useEffect(() => {
+    const intervalId = window.setInterval(() => {
+      setPresenceNowMs(Date.now());
+    }, 1_000);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (
+      !supabase ||
+      !room ||
+      !storedOnlineSession ||
+      storedOnlineSession.roomId !== room.id ||
+      storedOnlineSession.userId !== currentUserId
+    ) {
+      return;
+    }
+
+    let isActive = true;
+    const activeSession = storedOnlineSession;
+
+    async function sendHeartbeat() {
+      try {
+        await heartbeatOnlineSession(supabase!, activeSession);
+        setPresenceNowMs(Date.now());
+      } catch (error) {
+        if (!isActive) {
+          return;
+        }
+
+        if (isPermanentOnlineSessionError(error)) {
+          clearOnlineSession(activeSession.roomCode);
+          setStoredOnlineSession(null);
+          setErrorMessage(getSafeSupabaseErrorMessage(error));
+        }
+      }
+    }
+
+    void sendHeartbeat();
+
+    const heartbeatIntervalId = window.setInterval(
+      () => void sendHeartbeat(),
+      ONLINE_HEARTBEAT_INTERVAL_MS,
+    );
+
+    function handleVisibilityChange() {
+      if (document.visibilityState === "visible") {
+        void sendHeartbeat();
+      }
+    }
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("focus", sendHeartbeat);
+
+    return () => {
+      isActive = false;
+      window.clearInterval(heartbeatIntervalId);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("focus", sendHeartbeat);
+    };
+  }, [currentUserId, room, storedOnlineSession, supabase]);
+
+  useEffect(() => {
     if (!supabase || !room?.id) {
       return;
     }
@@ -217,7 +311,23 @@ export default function OnlineRoomPage() {
           table: "room_players",
         },
         () => {
-          void loadPlayers(room.id);
+          void loadPlayers(room.id)
+            .then((loadedPlayers) => {
+              if (!loadedPlayers || !currentUserId) {
+                return;
+              }
+
+              const savedSession = saveOnlineSessionFromPlayers(
+                room,
+                loadedPlayers,
+                currentUserId,
+              );
+
+              setStoredOnlineSession(savedSession);
+            })
+            .catch((error: unknown) => {
+              setErrorMessage(getSafeSupabaseErrorMessage(error));
+            });
         },
       )
       .on(
@@ -237,7 +347,7 @@ export default function OnlineRoomPage() {
     return () => {
       void supabase.removeChannel(channel);
     };
-  }, [loadPlayers, loadRoom, room, supabase]);
+  }, [currentUserId, loadPlayers, loadRoom, room, supabase]);
 
   useEffect(() => {
     if (room?.status === "started") {
@@ -373,11 +483,26 @@ export default function OnlineRoomPage() {
                           </p>
                         ) : null}
                       </div>
-                      {player.is_host ? (
-                        <span className="w-fit border-2 border-[#171915] bg-[#f9c74f] px-2 py-1 text-xs font-black uppercase">
-                          Host
+                      <div className="flex flex-wrap gap-2 sm:justify-end">
+                        <span
+                          className={`w-fit border-2 border-[#171915] px-2 py-1 text-xs font-black uppercase ${getConnectionStatusClassName(
+                            getOnlineConnectionStatus(
+                              player.last_seen_at,
+                              presenceNowMs,
+                            ),
+                          )}`}
+                        >
+                          {getOnlineConnectionStatus(
+                            player.last_seen_at,
+                            presenceNowMs,
+                          )}
                         </span>
-                      ) : null}
+                        {player.is_host ? (
+                          <span className="w-fit border-2 border-[#171915] bg-[#f9c74f] px-2 py-1 text-xs font-black uppercase">
+                            Host
+                          </span>
+                        ) : null}
+                      </div>
                     </div>
                   ))}
                 </div>

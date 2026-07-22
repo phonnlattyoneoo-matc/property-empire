@@ -25,13 +25,22 @@ import {
   type OnlineGamePlayer,
   type OnlineGameStateRow,
 } from "@/lib/online-game-state";
-import { sanitizeRoomCode, type OnlineRoom } from "@/lib/online-room";
 import {
+  sanitizeRoomCode,
+  sortOnlineRoomPlayers,
+  type OnlineRoom,
+  type OnlineRoomPlayer,
+} from "@/lib/online-room";
+import {
+  ONLINE_HEARTBEAT_INTERVAL_MS,
   clearOnlineSession,
+  getOnlineConnectionStatus,
   getStoredOnlineSession,
+  heartbeatOnlineSession,
   isPermanentOnlineSessionError,
   reconnectOnlineSession,
   saveOnlineSessionFromGameState,
+  type OnlineConnectionStatus,
   type StoredOnlineSession,
 } from "@/lib/online-session";
 import {
@@ -108,6 +117,18 @@ function getNotFoundMessage(error: { code?: string } | null) {
     : "";
 }
 
+function getConnectionStatusClassName(status: OnlineConnectionStatus) {
+  if (status === "Connected") {
+    return "bg-[#e7fbf4] text-[#171915]";
+  }
+
+  if (status === "Reconnecting") {
+    return "bg-[#fff1de] text-[#171915]";
+  }
+
+  return "bg-[#ffedf2] text-[#171915]";
+}
+
 export default function OnlineGamePage() {
   const params = useParams<{ code: string }>();
   const router = useRouter();
@@ -116,9 +137,11 @@ export default function OnlineGamePage() {
   const isConfigured = hasSupabaseConfig();
   const [currentUserId, setCurrentUserId] = useState("");
   const [room, setRoom] = useState<OnlineRoom | null>(null);
+  const [roomPlayers, setRoomPlayers] = useState<OnlineRoomPlayer[]>([]);
   const [gameRow, setGameRow] = useState<OnlineGameStateRow | null>(null);
   const [storedOnlineSession, setStoredOnlineSession] =
     useState<StoredOnlineSession | null>(null);
+  const [presenceNowMs, setPresenceNowMs] = useState(() => Date.now());
   const [errorMessage, setErrorMessage] = useState("");
   const [isLoading, setIsLoading] = useState(isConfigured);
   const [isReconnecting, setIsReconnecting] = useState(false);
@@ -285,6 +308,34 @@ export default function OnlineGamePage() {
     [supabase],
   );
 
+  const loadRoomPlayers = useCallback(
+    async (roomId: string) => {
+      if (!supabase) {
+        return null;
+      }
+
+      const { data, error } = await supabase
+        .from("room_players")
+        .select(
+          "id, room_id, user_id, display_name, is_host, joined_at, last_seen_at",
+        )
+        .eq("room_id", roomId);
+
+      if (error) {
+        throw error;
+      }
+
+      const sortedPlayers = sortOnlineRoomPlayers(
+        (data ?? []) as OnlineRoomPlayer[],
+      );
+
+      setRoomPlayers(sortedPlayers);
+
+      return sortedPlayers;
+    },
+    [supabase],
+  );
+
   useEffect(() => {
     if (!supabase || !isConfigured) {
       return;
@@ -336,7 +387,10 @@ export default function OnlineGamePage() {
           return;
         }
 
-        const loadedGameState = await loadGameState(loadedRoom.id);
+        const [loadedGameState] = await Promise.all([
+          loadGameState(loadedRoom.id),
+          loadRoomPlayers(loadedRoom.id),
+        ]);
 
         if (!loadedGameState || !isActive) {
           return;
@@ -380,7 +434,83 @@ export default function OnlineGamePage() {
     return () => {
       isActive = false;
     };
-  }, [isConfigured, loadGameState, loadRoom, roomCode, router, supabase]);
+  }, [
+    isConfigured,
+    loadGameState,
+    loadRoom,
+    loadRoomPlayers,
+    roomCode,
+    router,
+    supabase,
+  ]);
+
+  useEffect(() => {
+    const intervalId = window.setInterval(() => {
+      setPresenceNowMs(Date.now());
+    }, 1_000);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (
+      !supabase ||
+      !room ||
+      !storedOnlineSession ||
+      storedOnlineSession.roomId !== room.id ||
+      storedOnlineSession.userId !== currentUserId
+    ) {
+      return;
+    }
+
+    let isActive = true;
+    const activeSession = storedOnlineSession;
+
+    async function sendHeartbeat() {
+      try {
+        await heartbeatOnlineSession(supabase!, activeSession);
+        setPresenceNowMs(Date.now());
+      } catch (error) {
+        if (!isActive) {
+          return;
+        }
+
+        if (isPermanentOnlineSessionError(error)) {
+          clearOnlineSession(activeSession.roomCode);
+          setStoredOnlineSession(null);
+          setRoom(null);
+          setGameRow(null);
+          setRoomPlayers([]);
+          setErrorMessage(getSafeSupabaseErrorMessage(error));
+        }
+      }
+    }
+
+    void sendHeartbeat();
+
+    const heartbeatIntervalId = window.setInterval(
+      () => void sendHeartbeat(),
+      ONLINE_HEARTBEAT_INTERVAL_MS,
+    );
+
+    function handleVisibilityChange() {
+      if (document.visibilityState === "visible") {
+        void sendHeartbeat();
+      }
+    }
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("focus", sendHeartbeat);
+
+    return () => {
+      isActive = false;
+      window.clearInterval(heartbeatIntervalId);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("focus", sendHeartbeat);
+    };
+  }, [currentUserId, room, storedOnlineSession, supabase]);
 
   useEffect(() => {
     if (!supabase || !room?.id) {
@@ -413,6 +543,20 @@ export default function OnlineGamePage() {
       .on(
         "postgres_changes",
         {
+          event: "*",
+          filter: `room_id=eq.${room.id}`,
+          schema: "public",
+          table: "room_players",
+        },
+        () => {
+          void loadRoomPlayers(room.id).catch((error: unknown) => {
+            setErrorMessage(getSafeSupabaseErrorMessage(error));
+          });
+        },
+      )
+      .on(
+        "postgres_changes",
+        {
           event: "UPDATE",
           filter: `id=eq.${room.id}`,
           schema: "public",
@@ -436,7 +580,7 @@ export default function OnlineGamePage() {
     return () => {
       void supabase.removeChannel(channel);
     };
-  }, [loadGameState, loadRoom, room, supabase]);
+  }, [loadGameState, loadRoom, loadRoomPlayers, room, supabase]);
 
   useEffect(() => {
     if (room && room.status !== "started") {
@@ -780,6 +924,13 @@ export default function OnlineGamePage() {
     const isActive =
       !player.isEliminated && playerIndex === gameState?.currentPlayerIndex;
     const isLocalPlayer = player.userId === currentUserId;
+    const roomPlayer = roomPlayers.find((candidatePlayer) => {
+      return candidatePlayer.id === player.id;
+    });
+    const connectionStatus = getOnlineConnectionStatus(
+      roomPlayer?.last_seen_at,
+      presenceNowMs,
+    );
 
     return (
       <div
@@ -814,6 +965,13 @@ export default function OnlineGamePage() {
               Current
             </span>
           ) : null}
+          <span
+            className={`border-2 border-[#171915] px-2 py-1 text-[0.62rem] font-black uppercase ${getConnectionStatusClassName(
+              connectionStatus,
+            )}`}
+          >
+            {connectionStatus}
+          </span>
           {player.isDetained ? (
             <span className="border-2 border-[#171915] bg-[#ffedf2] px-2 py-1 text-[0.62rem] font-black uppercase">
               Detained

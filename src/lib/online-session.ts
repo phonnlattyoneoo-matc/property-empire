@@ -12,6 +12,14 @@ import {
 } from "@/lib/online-room";
 
 const ONLINE_SESSION_STORAGE_KEY = "property-empire-online-session-v1";
+export const ONLINE_HEARTBEAT_INTERVAL_MS = 7_000;
+export const ONLINE_RECONNECTING_AFTER_MS = 12_000;
+export const ONLINE_OFFLINE_AFTER_MS = 20_000;
+
+export type OnlineConnectionStatus =
+  | "Connected"
+  | "Reconnecting"
+  | "Offline";
 
 export type StoredOnlineSession = {
   displayName: string;
@@ -74,6 +82,33 @@ export function isPermanentOnlineSessionError(error: unknown) {
     message.includes("saved online") ||
     message.includes("not joined")
   );
+}
+
+export function getOnlineConnectionStatus(
+  lastSeenAt: string | null | undefined,
+  nowMs: number,
+): OnlineConnectionStatus {
+  if (!lastSeenAt) {
+    return "Offline";
+  }
+
+  const lastSeenMs = Date.parse(lastSeenAt);
+
+  if (!Number.isFinite(lastSeenMs)) {
+    return "Offline";
+  }
+
+  const elapsedMs = nowMs - lastSeenMs;
+
+  if (elapsedMs >= ONLINE_OFFLINE_AFTER_MS) {
+    return "Offline";
+  }
+
+  if (elapsedMs >= ONLINE_RECONNECTING_AFTER_MS) {
+    return "Reconnecting";
+  }
+
+  return "Connected";
 }
 
 function parseStoredOnlineSession(value: unknown): StoredOnlineSession | null {
@@ -377,4 +412,18 @@ export async function reconnectOnlineSession(
     ...savedSession,
     roomStatus: reconnectResult.roomStatus,
   };
+}
+
+export async function heartbeatOnlineSession(
+  supabase: SupabaseClient,
+  session: StoredOnlineSession,
+) {
+  const { error } = await supabase.rpc("heartbeat_online_player", {
+    expected_player_id: session.playerId,
+    target_room_id: session.roomId,
+  });
+
+  if (error) {
+    throw error;
+  }
 }
