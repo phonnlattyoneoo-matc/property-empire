@@ -6,7 +6,6 @@ import type { RealtimeChannel } from "@supabase/supabase-js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   BOARD_SPACE_COUNT,
-  CITY_LAUNCH_BONUS,
   STARTING_BALANCE,
 } from "@/lib/game-state";
 import {
@@ -83,11 +82,61 @@ type ResultPopup = {
   title: string;
 };
 
+type RentAnimation = {
+  developmentLabel: string | null;
+  id: number;
+  isTransit: boolean;
+  ownerColor: string;
+  ownerName: string;
+  payingPlayerBalance: number;
+  payingPlayerColor: string;
+  payingPlayerName: string;
+  position: number;
+  propertyGroupColor: string | null;
+  propertyGroupName: string | null;
+  rentAmount: number;
+  spaceName: string;
+};
+
+type LandingToast = {
+  accentColor: string;
+  id: number;
+  message: string;
+  title: string;
+  type: string;
+};
+
 const DICE_ANIMATION_DURATION_MS = 960;
 const REDUCED_DICE_ANIMATION_DURATION_MS = 180;
 const DICE_ANIMATION_FRAME_MS = 72;
 const TOKEN_STEP_DURATION_MS = 210;
 const REDUCED_TOKEN_STEP_DURATION_MS = 70;
+const RENT_ANIMATION_DURATION_MS = 2200;
+const LANDING_TOAST_DURATION_MS = 3800;
+const DIE_FACE_VALUES = [1, 2, 3, 4, 5, 6] as const;
+const DIE_FACE_CLASS_NAMES: Record<number, string> = {
+  1: "online-die-face-front",
+  2: "online-die-face-right",
+  3: "online-die-face-top",
+  4: "online-die-face-bottom",
+  5: "online-die-face-left",
+  6: "online-die-face-back",
+};
+const DIE_PIP_POSITIONS: Record<number, string[]> = {
+  1: ["center"],
+  2: ["top-left", "bottom-right"],
+  3: ["top-left", "center", "bottom-right"],
+  4: ["top-left", "top-right", "bottom-left", "bottom-right"],
+  5: ["top-left", "top-right", "center", "bottom-left", "bottom-right"],
+  6: [
+    "top-left",
+    "top-right",
+    "middle-left",
+    "middle-right",
+    "bottom-left",
+    "bottom-right",
+  ],
+};
 
 function getBoardPosition(index: number): CSSProperties {
   if (index < 7) {
@@ -138,6 +187,17 @@ function formatTransitRentTiers(separator = " / ") {
 
 function rollDie() {
   return Math.floor(Math.random() * 6) + 1;
+}
+
+function rollDicePair(): OnlineDiceRoll {
+  const dieOne = rollDie();
+  const dieTwo = rollDie();
+
+  return {
+    dieOne,
+    dieTwo,
+    total: dieOne + dieTwo,
+  };
 }
 
 function wait(milliseconds: number) {
@@ -583,6 +643,56 @@ function renderDevelopmentMarkers(level: PropertyDevelopmentLevel) {
   );
 }
 
+function renderDiePips(value: number) {
+  const safeValue = Math.min(6, Math.max(1, Math.round(value)));
+
+  return (
+    <span className="online-die-pips" aria-hidden="true">
+      {DIE_PIP_POSITIONS[safeValue].map((position) => (
+        <span
+          className={`online-die-pip online-die-pip-${position}`}
+          key={position}
+        />
+      ))}
+    </span>
+  );
+}
+
+function renderOnlineDie({
+  dieIndex,
+  isRolling,
+  label,
+  value,
+}: {
+  dieIndex: 1 | 2;
+  isRolling: boolean;
+  label: string;
+  value: number;
+}) {
+  const safeValue = Math.min(6, Math.max(1, Math.round(value)));
+
+  return (
+    <span
+      aria-label={`${label}: ${safeValue}`}
+      className={`online-die online-die-${dieIndex} online-die-value-${safeValue} ${
+        isRolling ? "online-die-rolling" : ""
+      }`}
+      role="img"
+    >
+      <span className="online-die-cube">
+        {DIE_FACE_VALUES.map((faceValue) => (
+          <span
+            className={`online-die-face ${DIE_FACE_CLASS_NAMES[faceValue]}`}
+            key={faceValue}
+          >
+            {renderDiePips(faceValue)}
+          </span>
+        ))}
+      </span>
+    </span>
+  );
+}
+
 function getConfirmedRollActor({
   nextState,
   previousState,
@@ -625,7 +735,7 @@ function isConfirmedRollUpdate({
   );
 }
 
-function createResultPopupFromConfirmedRoll({
+function createBlockingResultPopupFromConfirmedRoll({
   nextState,
   previousState,
 }: {
@@ -639,11 +749,6 @@ function createResultPopupFromConfirmedRoll({
   }
 
   const { nextPlayer, previousPlayer } = actor;
-  const destination = ONLINE_BOARD_SPACES[nextPlayer.position];
-  const normalizedMessage = nextState.message.toLowerCase();
-  const hasPendingPurchase =
-    nextState.pendingPropertyPurchasePosition !== null &&
-    nextState.pendingPropertyPurchasePosition !== undefined;
   const moneyChange = nextPlayer.balance - previousPlayer.balance;
   const basePopup = {
     balance: nextPlayer.balance,
@@ -673,22 +778,108 @@ function createResultPopupFromConfirmedRoll({
     };
   }
 
-  if (nextState.lastEventCard) {
-    return {
-      ...basePopup,
-      accentColor: onlineSpaceStyles.event.accent,
-      explanation: `${nextState.lastEventCard.description} ${nextState.lastEventCard.result} ${nextState.message}`,
-      resultType: "Event",
-      title: nextState.lastEventCard.title,
-    };
+  return null;
+}
+
+function createRentAnimationFromConfirmedRoll({
+  nextState,
+  previousState,
+}: {
+  nextState: OnlineGameState;
+  previousState: OnlineGameState;
+}): Omit<RentAnimation, "id"> | null {
+  const actor = getConfirmedRollActor({ nextState, previousState });
+
+  if (!actor) {
+    return null;
   }
 
-  if (normalizedMessage.includes(" rent")) {
+  const { nextPlayer } = actor;
+  const position = nextPlayer.position;
+  const destination = ONLINE_BOARD_SPACES[position];
+
+  if (!isOnlineBuyableSpace(destination)) {
+    return null;
+  }
+
+  const ownerId = nextState.propertyOwners[String(position)];
+
+  if (!ownerId || ownerId === nextPlayer.id) {
+    return null;
+  }
+
+  const previousOwner = previousState.players.find((player) => {
+    return player.id === ownerId;
+  });
+  const nextOwner = nextState.players.find((player) => {
+    return player.id === ownerId;
+  });
+
+  if (!previousOwner || !nextOwner) {
+    return null;
+  }
+
+  const rentAmount = nextOwner.balance - previousOwner.balance;
+
+  if (rentAmount <= 0) {
+    return null;
+  }
+
+  const propertyGroup = isOnlinePropertySpace(destination)
+    ? getPropertyGroup(destination.groupId)
+    : null;
+  const developmentLevel = isOnlinePropertySpace(destination)
+    ? getPropertyDevelopmentLevel(nextState, position)
+    : 0;
+
+  return {
+    developmentLabel: isOnlinePropertySpace(destination)
+      ? getDevelopmentLabel(developmentLevel)
+      : null,
+    isTransit: isOnlineTransitSpace(destination),
+    ownerColor: nextOwner.color,
+    ownerName: nextOwner.name,
+    payingPlayerBalance: nextPlayer.balance,
+    payingPlayerColor: nextPlayer.color,
+    payingPlayerName: nextPlayer.name,
+    position,
+    propertyGroupColor: propertyGroup?.color ?? null,
+    propertyGroupName: propertyGroup?.name ?? null,
+    rentAmount,
+    spaceName: destination.name,
+  };
+}
+
+function createLandingToastFromConfirmedRoll({
+  nextState,
+  previousState,
+}: {
+  nextState: OnlineGameState;
+  previousState: OnlineGameState;
+}): Omit<LandingToast, "id"> | null {
+  const actor = getConfirmedRollActor({ nextState, previousState });
+
+  if (!actor) {
+    return null;
+  }
+
+  const { nextPlayer, previousPlayer } = actor;
+  const destination = ONLINE_BOARD_SPACES[nextPlayer.position];
+  const normalizedMessage = nextState.message.toLowerCase();
+  const hasPendingPurchase =
+    nextState.pendingPropertyPurchasePosition !== null &&
+    nextState.pendingPropertyPurchasePosition !== undefined;
+
+  if (nextState.winnerPlayerId || nextPlayer.isEliminated) {
+    return null;
+  }
+
+  if (nextState.lastEventCard) {
     return {
-      ...basePopup,
-      accentColor: onlineSpaceStyles[destination.type].accent,
-      resultType: "Rent",
-      title: destination.name,
+      accentColor: onlineSpaceStyles.event.accent,
+      message: `${nextState.lastEventCard.description} ${nextState.lastEventCard.result}`,
+      title: nextState.lastEventCard.title,
+      type: "Event",
     };
   }
 
@@ -698,10 +889,10 @@ function createResultPopupFromConfirmedRoll({
     normalizedMessage.includes(" grid levy")
   ) {
     return {
-      ...basePopup,
       accentColor: onlineSpaceStyles.tax.accent,
-      resultType: "Tax",
+      message: nextState.message,
       title: destination.name,
+      type: "Tax",
     };
   }
 
@@ -710,41 +901,41 @@ function createResultPopupFromConfirmedRoll({
     normalizedMessage.includes("detention")
   ) {
     return {
-      ...basePopup,
       accentColor: onlineSpaceStyles.detention.accent,
-      resultType: "Detention",
+      message: nextState.message,
       title: "Civic Detention",
+      type: "Detention",
     };
   }
 
   if (destination.type === "rest" || normalizedMessage.includes("rooftop rest")) {
     return {
-      ...basePopup,
       accentColor: onlineSpaceStyles.rest.accent,
-      resultType: "Rest Area",
+      message: nextState.message,
       title: "Rooftop Rest",
+      type: "Rest Area",
     };
   }
 
   if (normalizedMessage.includes("city launch bonus")) {
     return {
-      ...basePopup,
       accentColor: onlineSpaceStyles.start.accent,
-      resultType: "Bonus",
+      message: nextState.message,
       title: "Grand Plaza Bonus",
+      type: "Bonus",
     };
   }
 
-  if (hasPendingPurchase) {
+  if (hasPendingPurchase || isOnlineBuyableSpace(destination)) {
     return null;
   }
 
-  if (isOnlineBuyableSpace(destination)) {
+  if (nextPlayer.balance !== previousPlayer.balance) {
     return {
-      ...basePopup,
       accentColor: onlineSpaceStyles[destination.type].accent,
-      resultType: destination.type === "transit" ? "Transit" : "Property",
+      message: nextState.message,
       title: destination.name,
+      type: "Result",
     };
   }
 
@@ -809,8 +1000,11 @@ export default function OnlineGamePage() {
   const params = useParams<{ code: string }>();
   const router = useRouter();
   const animationSequenceRef = useRef(0);
+  const dicePreviewIntervalRef = useRef<number | null>(null);
   const gameRowRef = useRef<OnlineGameStateRow | null>(null);
+  const landingToastTimeoutRef = useRef<number | null>(null);
   const lastAnimatedVersionRef = useRef<number | null>(null);
+  const rentAnimationTimeoutRef = useRef<number | null>(null);
   const roomCode = sanitizeRoomCode(params.code ?? "");
   const supabase = useMemo(() => getSupabaseBrowserClient(), []);
   const isConfigured = hasSupabaseConfig();
@@ -832,8 +1026,13 @@ export default function OnlineGamePage() {
   >(null);
   const [interactionPhase, setInteractionPhase] =
     useState<InteractionPhase>("idle");
+  const [landingToast, setLandingToast] = useState<LandingToast | null>(null);
+  const [rentAnimation, setRentAnimation] = useState<RentAnimation | null>(
+    null,
+  );
   const [resultPopup, setResultPopup] = useState<ResultPopup | null>(null);
   const [isLoading, setIsLoading] = useState(isConfigured);
+  const [isActivityModalOpen, setIsActivityModalOpen] = useState(false);
   const [isPropertiesModalOpen, setIsPropertiesModalOpen] = useState(false);
   const [isReconnecting, setIsReconnecting] = useState(false);
   const [isActing, setIsActing] = useState(false);
@@ -848,6 +1047,14 @@ export default function OnlineGamePage() {
   const displayedDiceRoll =
     animatedDiceRoll ??
     (interactionPhase === "rolling" ? null : gameState?.lastRoll);
+  const displayedDieOne = displayedDiceRoll?.dieOne ?? 1;
+  const displayedDieTwo = displayedDiceRoll?.dieTwo ?? 1;
+  const isDiceRolling =
+    interactionPhase === "rolling" ||
+    (isActing &&
+      gameState?.hasRolledThisTurn !== true &&
+      !gameState?.winnerPlayerId);
+  const activityEntryCount = gameState?.activityLog.length ?? 0;
   const winnerPlayer =
     gameState?.players.find((player) => player.id === gameState.winnerPlayerId) ??
     null;
@@ -947,6 +1154,25 @@ export default function OnlineGamePage() {
     !isInteractionLocked;
   const canPlayAgain =
     Boolean(room && gameRow && isHost && winnerPlayer) && !isInteractionLocked;
+  const diceStatusText = errorMessage
+    ? errorMessage
+    : !gameState
+      ? "Loading the shared game."
+      : isDiceRolling
+        ? "Rolling the city dice."
+        : canRoll
+          ? "Click the dice to roll."
+          : winnerPlayer
+            ? `${winnerPlayer.name} has won.`
+            : isDetentionTurn && isCurrentPlayer
+              ? "Leave Civic Detention to miss this turn."
+              : hasPendingPropertyPurchase
+                ? "Resolve the purchase choice before the turn continues."
+                : gameState.hasRolledThisTurn
+                  ? gameState.message
+                  : currentPlayer
+                    ? `Waiting for ${currentPlayer.name}.`
+                    : "Waiting for the shared game.";
   const ownedPropertyGroups =
     gameState && localPlayer
       ? Object.values(PROPERTY_GROUPS)
@@ -985,7 +1211,77 @@ export default function OnlineGamePage() {
     0,
   );
 
+  const stopDicePreview = useCallback(() => {
+    if (dicePreviewIntervalRef.current !== null) {
+      window.clearInterval(dicePreviewIntervalRef.current);
+      dicePreviewIntervalRef.current = null;
+    }
+  }, []);
+
+  const clearLandingToast = useCallback(() => {
+    if (landingToastTimeoutRef.current !== null) {
+      window.clearTimeout(landingToastTimeoutRef.current);
+      landingToastTimeoutRef.current = null;
+    }
+
+    setLandingToast(null);
+  }, []);
+
+  const clearRentAnimation = useCallback(() => {
+    if (rentAnimationTimeoutRef.current !== null) {
+      window.clearTimeout(rentAnimationTimeoutRef.current);
+      rentAnimationTimeoutRef.current = null;
+    }
+
+    setRentAnimation(null);
+  }, []);
+
+  const showLandingToast = useCallback((toast: Omit<LandingToast, "id">) => {
+    if (landingToastTimeoutRef.current !== null) {
+      window.clearTimeout(landingToastTimeoutRef.current);
+    }
+
+    setLandingToast({
+      ...toast,
+      id: Date.now(),
+    });
+
+    landingToastTimeoutRef.current = window.setTimeout(() => {
+      setLandingToast(null);
+      landingToastTimeoutRef.current = null;
+    }, LANDING_TOAST_DURATION_MS);
+  }, []);
+
+  const showRentAnimation = useCallback(
+    (animation: Omit<RentAnimation, "id">) => {
+      if (rentAnimationTimeoutRef.current !== null) {
+        window.clearTimeout(rentAnimationTimeoutRef.current);
+      }
+
+      setRentAnimation({
+        ...animation,
+        id: Date.now(),
+      });
+
+      rentAnimationTimeoutRef.current = window.setTimeout(() => {
+        setRentAnimation(null);
+        rentAnimationTimeoutRef.current = null;
+      }, prefersReducedMotion() ? 900 : RENT_ANIMATION_DURATION_MS);
+    },
+    [],
+  );
+
+  const startDicePreview = useCallback(() => {
+    stopDicePreview();
+    setAnimatedDiceRoll(rollDicePair());
+
+    dicePreviewIntervalRef.current = window.setInterval(() => {
+      setAnimatedDiceRoll(rollDicePair());
+    }, DICE_ANIMATION_FRAME_MS);
+  }, [stopDicePreview]);
+
   const animateDiceRoll = useCallback(async (finalRoll: OnlineDiceRoll) => {
+    stopDicePreview();
     const reducedMotion = prefersReducedMotion();
     const duration = reducedMotion
       ? REDUCED_DICE_ANIMATION_DURATION_MS
@@ -1001,7 +1297,7 @@ export default function OnlineGamePage() {
     }
 
     setAnimatedDiceRoll(finalRoll);
-  }, []);
+  }, [stopDicePreview]);
 
   const animateTokenMovement = useCallback(
     async ({
@@ -1064,6 +1360,8 @@ export default function OnlineGamePage() {
       const { nextPlayer, previousPlayer } = actor;
 
       try {
+        clearLandingToast();
+        clearRentAnimation();
         setResultPopup(null);
         setInteractionPhase("rolling");
         await animateDiceRoll(nextRow.state.lastRoll);
@@ -1085,16 +1383,34 @@ export default function OnlineGamePage() {
         }
 
         setInteractionPhase("resolving");
-        const nextPopup = createResultPopupFromConfirmedRoll({
+        const blockingPopup = createBlockingResultPopupFromConfirmedRoll({
           nextState: nextRow.state,
           previousState: previousRow.state,
         });
 
-        if (nextPopup) {
+        if (blockingPopup) {
           setResultPopup({
-            ...nextPopup,
+            ...blockingPopup,
             id: Date.now(),
           });
+        } else {
+          const rentPresentation = createRentAnimationFromConfirmedRoll({
+            nextState: nextRow.state,
+            previousState: previousRow.state,
+          });
+
+          if (rentPresentation) {
+            showRentAnimation(rentPresentation);
+          } else {
+            const toast = createLandingToastFromConfirmedRoll({
+              nextState: nextRow.state,
+              previousState: previousRow.state,
+            });
+
+            if (toast) {
+              showLandingToast(toast);
+            }
+          }
         }
       } finally {
         if (animationSequenceRef.current === sequenceId) {
@@ -1105,7 +1421,14 @@ export default function OnlineGamePage() {
         }
       }
     },
-    [animateDiceRoll, animateTokenMovement],
+    [
+      animateDiceRoll,
+      animateTokenMovement,
+      clearLandingToast,
+      clearRentAnimation,
+      showLandingToast,
+      showRentAnimation,
+    ],
   );
 
   const applyGameRowUpdate = useCallback(
@@ -1155,9 +1478,12 @@ export default function OnlineGamePage() {
         setAnimatedPlayerPositions({});
         setHighlightedBoardPosition(null);
         setInteractionPhase("idle");
+        clearLandingToast();
+        clearRentAnimation();
         setResultPopup(null);
       }
 
+      stopDicePreview();
       gameRowRef.current = nextRow;
       setGameRow(nextRow);
       setErrorMessage("");
@@ -1172,11 +1498,19 @@ export default function OnlineGamePage() {
         });
       }
     },
-    [animateConfirmedGameUpdate],
+    [
+      animateConfirmedGameUpdate,
+      clearLandingToast,
+      clearRentAnimation,
+      stopDicePreview,
+    ],
   );
 
   const clearGameRowState = useCallback(() => {
     animationSequenceRef.current += 1;
+    clearLandingToast();
+    clearRentAnimation();
+    stopDicePreview();
     gameRowRef.current = null;
     lastAnimatedVersionRef.current = null;
     setAnimatedDiceRoll(null);
@@ -1184,8 +1518,9 @@ export default function OnlineGamePage() {
     setHighlightedBoardPosition(null);
     setInteractionPhase("idle");
     setResultPopup(null);
+    setIsActivityModalOpen(false);
     setGameRow(null);
-  }, []);
+  }, [clearLandingToast, clearRentAnimation, stopDicePreview]);
 
   const loadRoom = useCallback(
     async (code: string) => {
@@ -1296,12 +1631,24 @@ export default function OnlineGamePage() {
   );
 
   useEffect(() => {
-    if (!isPropertiesModalOpen && !resultPopup) {
+    return () => {
+      clearLandingToast();
+      clearRentAnimation();
+      stopDicePreview();
+    };
+  }, [clearLandingToast, clearRentAnimation, stopDicePreview]);
+
+  useEffect(() => {
+    if (!isActivityModalOpen && !isPropertiesModalOpen && !resultPopup) {
       return;
     }
 
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") {
+        if (isActivityModalOpen) {
+          setIsActivityModalOpen(false);
+        }
+
         if (isPropertiesModalOpen) {
           setIsPropertiesModalOpen(false);
         }
@@ -1317,7 +1664,7 @@ export default function OnlineGamePage() {
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [isPropertiesModalOpen, resultPopup]);
+  }, [isActivityModalOpen, isPropertiesModalOpen, resultPopup]);
 
   useEffect(() => {
     if (!supabase || !isConfigured) {
@@ -1667,16 +2014,17 @@ export default function OnlineGamePage() {
 
     setIsActing(true);
     setInteractionPhase("rolling");
-    setAnimatedDiceRoll(null);
+    startDicePreview();
+    clearLandingToast();
+    clearRentAnimation();
     setResultPopup(null);
     setErrorMessage("");
 
     try {
-      const dieOne = rollDie();
-      const dieTwo = rollDie();
+      const diceRoll = rollDicePair();
       const { data, error } = await supabase.rpc("roll_online_turn", {
-        die_one: dieOne,
-        die_two: dieTwo,
+        die_one: diceRoll.dieOne,
+        die_two: diceRoll.dieTwo,
         expected_version: gameRow.version,
         target_room_id: room.id,
       });
@@ -1694,6 +2042,7 @@ export default function OnlineGamePage() {
       applyGameRowUpdate(parsedGameState);
     } catch (error) {
       animationSequenceRef.current += 1;
+      stopDicePreview();
       setAnimatedDiceRoll(null);
       setHighlightedBoardPosition(null);
       setInteractionPhase("idle");
@@ -2004,6 +2353,16 @@ export default function OnlineGamePage() {
     setIsPropertiesModalOpen(false);
   }
 
+  function closeActivityModal() {
+    setIsActivityModalOpen(false);
+  }
+
+  function handleActivityBackdropMouseDown(event: MouseEvent<HTMLDivElement>) {
+    if (event.target === event.currentTarget) {
+      closeActivityModal();
+    }
+  }
+
   function handlePropertiesBackdropMouseDown(event: MouseEvent<HTMLDivElement>) {
     if (event.target === event.currentTarget) {
       closePropertiesModal();
@@ -2271,7 +2630,7 @@ export default function OnlineGamePage() {
             </div>
           ) : gameState ? (
             <div className="game-board-scroll overflow-x-auto pb-4">
-              <div className="game-board grid aspect-square min-w-[620px] grid-cols-7 grid-rows-7 border-2 border-[#171915] bg-[#171915] shadow-[12px_12px_0_0_#f9c74f]">
+              <div className="game-board relative grid aspect-square min-w-[620px] grid-cols-7 grid-rows-7 border-2 border-[#171915] bg-[#171915] shadow-[12px_12px_0_0_#f9c74f]">
                 {ONLINE_BOARD_SPACES.map((space, index) => {
                   const styles = onlineSpaceStyles[space.type];
                   const propertyGroup = isOnlinePropertySpace(space)
@@ -2305,11 +2664,16 @@ export default function OnlineGamePage() {
                   );
                   const isAnimatedStep =
                     highlightedBoardPosition === index;
+                  const isRentFocus = rentAnimation?.position === index;
+                  const isRentDimmed =
+                    rentAnimation !== null && rentAnimation.position !== index;
 
                   return (
                     <div
                       className={`game-board-space relative flex min-h-0 flex-col justify-between border border-[#171915] p-1.5 text-[#171915] ${
                         isAnimatedStep ? "game-board-space-active-step" : ""
+                      } ${isRentFocus ? "online-board-space-rent-focus" : ""} ${
+                        isRentDimmed ? "online-board-space-dimmed" : ""
                       }`}
                       key={space.name}
                       style={{
@@ -2411,21 +2775,182 @@ export default function OnlineGamePage() {
                 })}
 
                 <div
-                  className="game-board-center flex flex-col items-center justify-center border-2 border-[#171915] bg-[#171915] p-6 text-center text-white"
+                  className="game-board-center online-board-center flex flex-col items-center justify-center border-2 border-[#171915] bg-[#171915] p-6 text-center text-white"
                   style={{ gridColumn: "2 / 7", gridRow: "2 / 7" }}
                 >
                   <p
                     className="game-board-center-accent mb-4 h-1.5 w-24 bg-[#ef476f]"
                     aria-hidden="true"
                   />
-                  <h2 className="game-board-center-title text-4xl font-black tracking-normal sm:text-6xl">
-                    Online City
-                  </h2>
-                  <p className="game-board-center-copy mt-4 max-w-md text-base font-bold leading-7 text-[#f7f8f4] sm:text-lg">
-                    Pass or land on Grand Plaza to collect{" "}
-                    {formatCurrency(CITY_LAUNCH_BONUS)}.
+                  <div>
+                    <p className="text-xs font-black uppercase tracking-normal text-[#cfd7ca]">
+                      Online City
+                    </p>
+                    <h2 className="game-board-center-title text-3xl font-black tracking-normal sm:text-5xl">
+                      Roll Center
+                    </h2>
+                  </div>
+
+                  <button
+                    aria-label={
+                      canRoll
+                        ? "Roll the dice"
+                        : `Dice unavailable. ${diceStatusText}`
+                    }
+                    className={`online-dice-button mt-4 ${
+                      isDiceRolling ? "online-dice-button-rolling" : ""
+                    }`}
+                    disabled={!canRoll}
+                    onClick={rollDice}
+                    type="button"
+                  >
+                    <span className="online-dice-stage">
+                      {renderOnlineDie({
+                        dieIndex: 1,
+                        isRolling: isDiceRolling,
+                        label: "Die one",
+                        value: displayedDieOne,
+                      })}
+                      {renderOnlineDie({
+                        dieIndex: 2,
+                        isRolling: isDiceRolling,
+                        label: "Die two",
+                        value: displayedDieTwo,
+                      })}
+                    </span>
+                    <span className="online-dice-total">
+                      {displayedDiceRoll
+                        ? `Total ${displayedDiceRoll.total}`
+                        : "Tap to Roll"}
+                    </span>
+                  </button>
+
+                  <p className="online-dice-status mt-4 max-w-md text-sm font-bold leading-6 text-[#f7f8f4]">
+                    {diceStatusText}
                   </p>
                 </div>
+
+                {rentAnimation ? (
+                  <section
+                    aria-live="polite"
+                    className="online-rent-presentation"
+                    key={rentAnimation.id}
+                  >
+                    <div className="online-rent-card">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="text-xs font-black uppercase text-[#596057]">
+                            Rent Due
+                          </p>
+                          <h2 className="mt-1 break-words text-2xl font-black leading-none text-[#171915]">
+                            {rentAnimation.spaceName}
+                          </h2>
+                        </div>
+                        <p className="shrink-0 border-2 border-[#171915] bg-[#f9c74f] px-3 py-1 text-lg font-black text-[#171915]">
+                          {formatCurrency(rentAnimation.rentAmount)}
+                        </p>
+                      </div>
+
+                      {rentAnimation.propertyGroupName ? (
+                        <div className="mt-3 flex items-center gap-2">
+                          <span
+                            aria-hidden="true"
+                            className="h-4 w-12 border-2 border-[#171915]"
+                            style={{
+                              backgroundColor:
+                                rentAnimation.propertyGroupColor ?? "#f9c74f",
+                            }}
+                          />
+                          <span className="text-xs font-black uppercase text-[#445045]">
+                            {rentAnimation.propertyGroupName}
+                          </span>
+                        </div>
+                      ) : null}
+
+                      <div className="online-rent-flow mt-4">
+                        <div className="online-rent-player">
+                          <span
+                            aria-hidden="true"
+                            className="online-rent-token"
+                            style={{
+                              backgroundColor:
+                                rentAnimation.payingPlayerColor,
+                            }}
+                          />
+                          <span>
+                            <span className="block text-[0.62rem] font-black uppercase text-[#596057]">
+                              Paying
+                            </span>
+                            <span className="block break-words text-sm font-black">
+                              {rentAnimation.payingPlayerName}
+                            </span>
+                          </span>
+                        </div>
+
+                        <div
+                          aria-hidden="true"
+                          className="online-rent-money-lane"
+                        >
+                          <span className="online-rent-chip">$</span>
+                          <span className="online-rent-chip online-rent-chip-2">
+                            $
+                          </span>
+                          <span className="online-rent-arrow">→</span>
+                        </div>
+
+                        <div className="online-rent-player">
+                          <span
+                            aria-hidden="true"
+                            className="online-rent-token"
+                            style={{
+                              backgroundColor: rentAnimation.ownerColor,
+                            }}
+                          />
+                          <span>
+                            <span className="block text-[0.62rem] font-black uppercase text-[#596057]">
+                              Owner
+                            </span>
+                            <span className="block break-words text-sm font-black">
+                              {rentAnimation.ownerName}
+                            </span>
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="mt-4 grid grid-cols-2 gap-2">
+                        <div className="border-2 border-[#171915] bg-[#f7f8f4] p-2">
+                          <p className="text-[0.62rem] font-black uppercase text-[#596057]">
+                            Development
+                          </p>
+                          <p className="text-sm font-black">
+                            {rentAnimation.developmentLabel ??
+                              (rentAnimation.isTransit
+                                ? "Transit Station"
+                                : "No buildings")}
+                          </p>
+                        </div>
+                        <div className="border-2 border-[#171915] bg-[#f7f8f4] p-2">
+                          <p className="text-[0.62rem] font-black uppercase text-[#596057]">
+                            Payer Balance
+                          </p>
+                          <p className="text-sm font-black">
+                            {formatCurrency(
+                              rentAnimation.payingPlayerBalance,
+                            )}
+                          </p>
+                        </div>
+                      </div>
+
+                      <button
+                        className="mt-4 min-h-10 w-full border-2 border-[#171915] bg-[#06d6a0] px-3 py-2 text-sm font-black text-[#171915] shadow-[4px_4px_0_0_#171915] transition-transform hover:-translate-y-0.5 focus:outline-none focus:ring-4 focus:ring-[#06d6a0]/35"
+                        onClick={clearRentAnimation}
+                        type="button"
+                      >
+                        Continue
+                      </button>
+                    </div>
+                  </section>
+                ) : null}
               </div>
             </div>
           ) : null}
@@ -2444,69 +2969,6 @@ export default function OnlineGamePage() {
                 </p>
               )}
             </div>
-          </div>
-
-          <div className="game-panel game-activity-panel game-shadow-blue border-2 border-[#171915] bg-white/90 p-4 shadow-[8px_8px_0_0_#3454d1] backdrop-blur">
-            <h2 className="game-panel-title text-2xl font-black">Game Activity</h2>
-
-            <div className="game-activity-list mt-4 max-h-[420px] space-y-3 overflow-y-auto pr-1">
-              {gameState && gameState.activityLog.length > 0 ? (
-                gameState.activityLog.map((entry) => (
-                  <div
-                    className="game-activity-entry border-2 border-[#171915] bg-[#f7f8f4] p-3"
-                    key={entry.id}
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <p className="break-words text-sm font-black">
-                        {entry.playerName}
-                      </p>
-                      <p className="shrink-0 text-xs font-black uppercase text-[#596057]">
-                        {formatActivityTime(entry.createdAt)}
-                      </p>
-                    </div>
-                    <p className="mt-2 text-sm font-bold leading-6 text-[#445045]">
-                      {entry.message}
-                    </p>
-                  </div>
-                ))
-              ) : (
-                <p className="border-2 border-[#171915] bg-[#f7f8f4] p-3 text-sm font-bold">
-                  Waiting for activity
-                </p>
-              )}
-            </div>
-          </div>
-
-          <div className="game-panel game-dice-panel game-shadow-yellow border-2 border-[#171915] bg-white/90 p-4 shadow-[8px_8px_0_0_#f9c74f] backdrop-blur">
-            <h2 className="game-panel-title text-2xl font-black">Dice</h2>
-
-            <div className="game-dice-grid mt-4 grid grid-cols-3 gap-3">
-              <div
-                className={`game-dice-cell flex aspect-square items-center justify-center border-2 border-[#171915] bg-[#f7f8f4] text-3xl font-black ${
-                  interactionPhase === "rolling" ? "game-dice-tumbling" : ""
-                }`}
-              >
-                {displayedDiceRoll?.dieOne ?? "-"}
-              </div>
-              <div
-                className={`game-dice-cell flex aspect-square items-center justify-center border-2 border-[#171915] bg-[#f7f8f4] text-3xl font-black ${
-                  interactionPhase === "rolling" ? "game-dice-tumbling" : ""
-                }`}
-              >
-                {displayedDiceRoll?.dieTwo ?? "-"}
-              </div>
-              <div
-                className={`game-dice-cell flex aspect-square items-center justify-center border-2 border-[#171915] bg-[#171915] text-3xl font-black text-white ${
-                  interactionPhase === "rolling" ? "game-dice-tumbling" : ""
-                }`}
-              >
-                {displayedDiceRoll?.total ?? "-"}
-              </div>
-            </div>
-
-            <p className="game-message mt-4 border-2 border-[#171915] bg-[#f7f8f4] p-3 text-sm font-bold leading-6 text-[#445045]">
-              {errorMessage || gameState?.message || "Loading online turn"}
-            </p>
           </div>
 
           <div className="game-panel game-turn-panel game-shadow-cyan border-2 border-[#171915] bg-white/90 p-4 shadow-[8px_8px_0_0_#118ab2] backdrop-blur">
@@ -2589,22 +3051,14 @@ export default function OnlineGamePage() {
                           : `Waiting for ${currentPlayer.name}.`
                       : "Waiting for game state."}
               </p>
+
+              <p className="game-message border-2 border-[#171915] bg-white p-3 text-sm font-bold leading-6 text-[#445045]">
+                {errorMessage || gameState?.message || "Loading online turn"}
+              </p>
             </div>
           </div>
 
           <div className="game-buttons grid gap-4 sm:grid-cols-3 xl:grid-cols-1">
-            <button
-              className="h-14 border-2 border-[#171915] bg-[#3454d1] px-6 text-base font-bold text-white shadow-[8px_8px_0_0_#171915] transition-transform hover:-translate-y-0.5 focus:outline-none focus:ring-4 focus:ring-[#3454d1]/35 disabled:cursor-not-allowed disabled:bg-[#596057] disabled:opacity-55 disabled:shadow-none"
-              disabled={!canRoll}
-              onClick={rollDice}
-              type="button"
-            >
-              {interactionPhase === "rolling" ||
-              (isActing && !gameState?.hasRolledThisTurn)
-                ? "Rolling..."
-                : "Roll Dice"}
-            </button>
-
             <button
               className="h-14 border-2 border-[#171915] bg-[#06d6a0] px-6 text-base font-bold text-[#171915] shadow-[8px_8px_0_0_#171915] transition-transform hover:-translate-y-0.5 focus:outline-none focus:ring-4 focus:ring-[#06d6a0]/35 disabled:cursor-not-allowed disabled:bg-[#c6cbbf] disabled:text-[#596057] disabled:opacity-70 disabled:shadow-none"
               disabled={!canEndTurn}
@@ -2655,6 +3109,34 @@ export default function OnlineGamePage() {
             </button>
 
             <button
+              className="flex h-14 items-center justify-center gap-2 border-2 border-[#171915] bg-white px-4 text-base font-bold text-[#171915] shadow-[8px_8px_0_0_#3454d1] transition-transform hover:-translate-y-0.5 focus:outline-none focus:ring-4 focus:ring-[#3454d1]/35 disabled:cursor-not-allowed disabled:bg-[#c6cbbf] disabled:text-[#596057] disabled:opacity-70 disabled:shadow-none"
+              disabled={!gameState}
+              onClick={() => setIsActivityModalOpen(true)}
+              type="button"
+            >
+              <svg
+                aria-hidden="true"
+                className="h-5 w-5 shrink-0"
+                fill="none"
+                stroke="currentColor"
+                strokeLinecap="square"
+                strokeLinejoin="miter"
+                strokeWidth="2.5"
+                viewBox="0 0 24 24"
+              >
+                <path d="M4 5h16" />
+                <path d="M4 12h12" />
+                <path d="M4 19h8" />
+                <path d="M18 15l2 2-2 2" />
+                <path d="M14 17h6" />
+              </svg>
+              <span>Activity</span>
+              <span className="rounded-full border-2 border-[#171915] bg-[#f9c74f] px-2 py-0.5 text-xs font-black leading-none">
+                {activityEntryCount}
+              </span>
+            </button>
+
+            <button
               className="h-14 border-2 border-[#171915] bg-[#ef476f] px-6 text-base font-bold text-white shadow-[8px_8px_0_0_#171915] transition-transform hover:-translate-y-0.5 focus:outline-none focus:ring-4 focus:ring-[#ef476f]/35 disabled:cursor-not-allowed disabled:bg-[#c6cbbf] disabled:text-[#596057] disabled:opacity-70 disabled:shadow-none"
               disabled={isInteractionLocked}
               onClick={exitGame}
@@ -2678,6 +3160,34 @@ export default function OnlineGamePage() {
           ) : null}
         </aside>
       </section>
+
+      {landingToast ? (
+        <div className="online-landing-toast" key={landingToast.id}>
+          <span
+            aria-hidden="true"
+            className="online-landing-toast-accent"
+            style={{ backgroundColor: landingToast.accentColor }}
+          />
+          <div className="min-w-0">
+            <p className="text-xs font-black uppercase text-[#596057]">
+              {landingToast.type}
+            </p>
+            <p className="break-words text-base font-black">
+              {landingToast.title}
+            </p>
+            <p className="mt-1 text-sm font-bold leading-5 text-[#445045]">
+              {landingToast.message}
+            </p>
+          </div>
+          <button
+            className="ml-2 h-9 shrink-0 border-2 border-[#171915] bg-white px-3 text-xs font-black text-[#171915] shadow-[3px_3px_0_0_#171915] transition-transform hover:-translate-y-0.5 focus:outline-none focus:ring-4 focus:ring-[#ef476f]/35"
+            onClick={clearLandingToast}
+            type="button"
+          >
+            Close
+          </button>
+        </div>
+      ) : null}
 
       {gameState?.hasRolledThisTurn &&
       !isGameOver &&
@@ -2774,6 +3284,73 @@ export default function OnlineGamePage() {
               >
                 Continue
               </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {isActivityModalOpen && gameState ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-[#171915]/60 px-4 py-6 backdrop-blur-sm"
+          onMouseDown={handleActivityBackdropMouseDown}
+        >
+          <section
+            aria-labelledby="online-activity-title"
+            aria-modal="true"
+            className="game-activity-modal flex max-h-[min(90vh,760px)] w-full max-w-3xl flex-col border-2 border-[#171915] bg-white shadow-[12px_12px_0_0_#3454d1]"
+            role="dialog"
+          >
+            <div className="flex items-start justify-between gap-4 border-b-2 border-[#171915] bg-[#f7f8f4] p-4">
+              <div>
+                <p className="text-sm font-black uppercase text-[#596057]">
+                  Newest first
+                </p>
+                <h2
+                  className="text-3xl font-black leading-none"
+                  id="online-activity-title"
+                >
+                  Game Activity
+                </h2>
+              </div>
+
+              <button
+                className="h-11 border-2 border-[#171915] bg-white px-4 text-sm font-black text-[#171915] shadow-[4px_4px_0_0_#171915] transition-transform hover:-translate-y-0.5 focus:outline-none focus:ring-4 focus:ring-[#ef476f]/35"
+                onClick={closeActivityModal}
+                type="button"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="game-activity-modal-body flex-1 space-y-3 overflow-y-auto p-4">
+              {gameState.activityLog.length > 0 ? (
+                gameState.activityLog.map((entry) => (
+                  <article
+                    className="border-2 border-[#171915] bg-[#f7f8f4] p-3"
+                    key={entry.id}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <p className="break-words text-base font-black">
+                        {entry.playerName}
+                      </p>
+                      <p className="shrink-0 text-xs font-black uppercase text-[#596057]">
+                        {formatActivityTime(entry.createdAt)}
+                      </p>
+                    </div>
+                    <p className="mt-2 text-sm font-bold leading-6 text-[#445045]">
+                      {entry.message}
+                    </p>
+                  </article>
+                ))
+              ) : (
+                <div className="border-2 border-[#171915] bg-[#f7f8f4] p-5">
+                  <p className="text-xl font-black">No activity yet.</p>
+                  <p className="mt-2 text-sm font-bold leading-6 text-[#445045]">
+                    Shared game activity will appear here as players take
+                    actions.
+                  </p>
+                </div>
+              )}
             </div>
           </section>
         </div>
