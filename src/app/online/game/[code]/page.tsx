@@ -1,7 +1,7 @@
 "use client";
 
 import { useParams, useRouter } from "next/navigation";
-import type { CSSProperties } from "react";
+import type { CSSProperties, MouseEvent } from "react";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
@@ -18,6 +18,7 @@ import {
   isOnlineTransitSpace,
   onlineSpaceStyles,
   type OnlineBuyableSpace,
+  type OnlinePropertySpace,
 } from "@/lib/online-board";
 import {
   parseOnlineGameStateRow,
@@ -44,11 +45,31 @@ import {
   type StoredOnlineSession,
 } from "@/lib/online-session";
 import {
+  HOTEL_DEVELOPMENT_LEVEL,
+  MAX_HOUSES,
+  PROPERTY_GROUPS,
+  getDevelopmentLabel,
+  getDevelopmentSaleValue,
+  getPropertyGroup,
+  getPropertyRent,
+  type PropertyDevelopmentLevel,
+  type PropertyGroupId,
+} from "@/lib/property-development";
+import {
   ensureAnonymousUser,
   getSupabaseBrowserClient,
   hasSupabaseConfig,
 } from "@/lib/supabase/client";
 import { getSafeSupabaseErrorMessage } from "@/lib/supabase/error-message";
+
+type BoardSide = "bottom" | "left" | "right" | "top";
+
+type DevelopmentActionStatus = {
+  canAct: boolean;
+  label: string;
+  nextLevel: PropertyDevelopmentLevel | null;
+  reason: string | null;
+};
 
 function getBoardPosition(index: number): CSSProperties {
   if (index < 7) {
@@ -66,10 +87,29 @@ function getBoardPosition(index: number): CSSProperties {
   return { gridColumn: 1, gridRow: index - 17 };
 }
 
+function getBoardSide(index: number): BoardSide {
+  if (index < 7) {
+    return "bottom";
+  }
+
+  if (index < 13) {
+    return "right";
+  }
+
+  if (index < 19) {
+    return "top";
+  }
+
+  return "left";
+}
+
 function formatCurrency(amount: number) {
+  const fractionDigits = Number.isInteger(amount) ? 0 : 2;
+
   return new Intl.NumberFormat("en-US", {
     currency: "USD",
-    maximumFractionDigits: 0,
+    maximumFractionDigits: fractionDigits,
+    minimumFractionDigits: fractionDigits,
     style: "currency",
   }).format(amount);
 }
@@ -109,6 +149,386 @@ function getTransitRent(stationCount: number) {
   return ONLINE_TRANSIT_RENTS[
     Math.min(stationCount, ONLINE_TRANSIT_RENTS.length - 1)
   ];
+}
+
+function getPropertyDevelopmentLevel(
+  gameState: OnlineGameState,
+  position: number,
+): PropertyDevelopmentLevel {
+  return gameState.propertyDevelopments[String(position)] ?? 0;
+}
+
+function getDevelopedPropertyRent(
+  gameState: OnlineGameState,
+  position: number,
+  property: OnlinePropertySpace,
+) {
+  return (
+    getPropertyRent(position, getPropertyDevelopmentLevel(gameState, position)) ??
+    property.rent
+  );
+}
+
+function getPropertyGroupDevelopmentLevels(
+  gameState: OnlineGameState,
+  groupId: PropertyGroupId,
+) {
+  return PROPERTY_GROUPS[groupId].propertyPositions.map((position) =>
+    getPropertyDevelopmentLevel(gameState, position),
+  );
+}
+
+function playerOwnsPropertyGroup(
+  gameState: OnlineGameState,
+  playerId: string,
+  groupId: PropertyGroupId,
+) {
+  return PROPERTY_GROUPS[groupId].propertyPositions.every((position) => {
+    return gameState.propertyOwners[String(position)] === playerId;
+  });
+}
+
+function getBuildActionStatus({
+  gameState,
+  isActing,
+  isCurrentPlayer,
+  isTurnTimerExpired,
+  player,
+  position,
+  property,
+}: {
+  gameState: OnlineGameState;
+  isActing: boolean;
+  isCurrentPlayer: boolean;
+  isTurnTimerExpired: boolean;
+  player: OnlineGamePlayer;
+  position: number;
+  property: OnlinePropertySpace;
+}): DevelopmentActionStatus {
+  const owner = getSpaceOwner(gameState, position);
+  const group = getPropertyGroup(property.groupId);
+  const currentLevel = getPropertyDevelopmentLevel(gameState, position);
+  const label =
+    currentLevel >= MAX_HOUSES ? "Build Hotel" : "Build House";
+
+  if (gameState.winnerPlayerId) {
+    return {
+      canAct: false,
+      label,
+      nextLevel: null,
+      reason: "The game is over.",
+    };
+  }
+
+  if (!isCurrentPlayer) {
+    return {
+      canAct: false,
+      label,
+      nextLevel: null,
+      reason: "Wait for your turn to build.",
+    };
+  }
+
+  if (isActing) {
+    return {
+      canAct: false,
+      label,
+      nextLevel: null,
+      reason: "An online action is already being submitted.",
+    };
+  }
+
+  if (isTurnTimerExpired) {
+    return {
+      canAct: false,
+      label,
+      nextLevel: null,
+      reason: "The turn timer expired.",
+    };
+  }
+
+  if (player.isEliminated) {
+    return {
+      canAct: false,
+      label,
+      nextLevel: null,
+      reason: "Bankrupt players cannot build.",
+    };
+  }
+
+  if (gameState.isDetentionTurn || player.isDetained) {
+    return {
+      canAct: false,
+      label,
+      nextLevel: null,
+      reason: "Leave detention before developing properties.",
+    };
+  }
+
+  if (gameState.pendingPropertyPurchasePosition !== null) {
+    return {
+      canAct: false,
+      label,
+      nextLevel: null,
+      reason: "Choose Buy or Skip before developing properties.",
+    };
+  }
+
+  if (owner?.id !== player.id) {
+    return {
+      canAct: false,
+      label,
+      nextLevel: null,
+      reason: "Only the owner can build here.",
+    };
+  }
+
+  if (!playerOwnsPropertyGroup(gameState, player.id, property.groupId)) {
+    return {
+      canAct: false,
+      label,
+      nextLevel: null,
+      reason: `Own every ${group.name} property to build.`,
+    };
+  }
+
+  if (currentLevel >= HOTEL_DEVELOPMENT_LEVEL) {
+    return {
+      canAct: false,
+      label,
+      nextLevel: null,
+      reason: "This property already has a hotel.",
+    };
+  }
+
+  if (player.balance < group.buildCost) {
+    return {
+      canAct: false,
+      label,
+      nextLevel: null,
+      reason: `Need ${formatCurrency(group.buildCost)} available to build.`,
+    };
+  }
+
+  const groupLevels = getPropertyGroupDevelopmentLevels(
+    gameState,
+    property.groupId,
+  );
+
+  if (currentLevel < MAX_HOUSES) {
+    const lowestGroupLevel = Math.min(...groupLevels);
+
+    if (currentLevel !== lowestGroupLevel) {
+      return {
+        canAct: false,
+        label,
+        nextLevel: null,
+        reason: "Build evenly across the group first.",
+      };
+    }
+
+    return {
+      canAct: true,
+      label,
+      nextLevel: (currentLevel + 1) as PropertyDevelopmentLevel,
+      reason: null,
+    };
+  }
+
+  if (groupLevels.some((level) => level < MAX_HOUSES)) {
+    return {
+      canAct: false,
+      label,
+      nextLevel: null,
+      reason: "Every property in the group needs 4 houses before a hotel.",
+    };
+  }
+
+  return {
+    canAct: true,
+    label,
+    nextLevel: HOTEL_DEVELOPMENT_LEVEL,
+    reason: null,
+  };
+}
+
+function getSellActionStatus({
+  gameState,
+  isActing,
+  isCurrentPlayer,
+  isTurnTimerExpired,
+  player,
+  position,
+  property,
+}: {
+  gameState: OnlineGameState;
+  isActing: boolean;
+  isCurrentPlayer: boolean;
+  isTurnTimerExpired: boolean;
+  player: OnlineGamePlayer;
+  position: number;
+  property: OnlinePropertySpace;
+}): DevelopmentActionStatus {
+  const owner = getSpaceOwner(gameState, position);
+  const currentLevel = getPropertyDevelopmentLevel(gameState, position);
+  const label =
+    currentLevel === HOTEL_DEVELOPMENT_LEVEL ? "Sell Hotel" : "Sell House";
+
+  if (gameState.winnerPlayerId) {
+    return {
+      canAct: false,
+      label,
+      nextLevel: null,
+      reason: "The game is over.",
+    };
+  }
+
+  if (!isCurrentPlayer) {
+    return {
+      canAct: false,
+      label,
+      nextLevel: null,
+      reason: "Wait for your turn to sell.",
+    };
+  }
+
+  if (isActing) {
+    return {
+      canAct: false,
+      label,
+      nextLevel: null,
+      reason: "An online action is already being submitted.",
+    };
+  }
+
+  if (isTurnTimerExpired) {
+    return {
+      canAct: false,
+      label,
+      nextLevel: null,
+      reason: "The turn timer expired.",
+    };
+  }
+
+  if (player.isEliminated) {
+    return {
+      canAct: false,
+      label,
+      nextLevel: null,
+      reason: "Bankrupt players cannot sell buildings.",
+    };
+  }
+
+  if (gameState.isDetentionTurn || player.isDetained) {
+    return {
+      canAct: false,
+      label,
+      nextLevel: null,
+      reason: "Leave detention before selling buildings.",
+    };
+  }
+
+  if (gameState.pendingPropertyPurchasePosition !== null) {
+    return {
+      canAct: false,
+      label,
+      nextLevel: null,
+      reason: "Choose Buy or Skip before selling buildings.",
+    };
+  }
+
+  if (owner?.id !== player.id) {
+    return {
+      canAct: false,
+      label,
+      nextLevel: null,
+      reason: "Only the owner can sell buildings here.",
+    };
+  }
+
+  if (currentLevel === 0) {
+    return {
+      canAct: false,
+      label,
+      nextLevel: null,
+      reason: "No buildings to sell.",
+    };
+  }
+
+  const groupLevels = getPropertyGroupDevelopmentLevels(
+    gameState,
+    property.groupId,
+  );
+  const highestGroupLevel = Math.max(...groupLevels);
+
+  if (currentLevel !== highestGroupLevel) {
+    return {
+      canAct: false,
+      label,
+      nextLevel: null,
+      reason: "Sell from the most-developed properties first.",
+    };
+  }
+
+  return {
+    canAct: true,
+    label,
+    nextLevel:
+      currentLevel === HOTEL_DEVELOPMENT_LEVEL
+        ? MAX_HOUSES
+        : ((currentLevel - 1) as PropertyDevelopmentLevel),
+    reason: null,
+  };
+}
+
+function getNextDevelopmentLevel(level: PropertyDevelopmentLevel) {
+  if (level >= HOTEL_DEVELOPMENT_LEVEL) {
+    return null;
+  }
+
+  return (level + 1) as PropertyDevelopmentLevel;
+}
+
+function getOwnershipProgress(ownedPropertyCount: number, groupSize: number) {
+  return ownedPropertyCount === groupSize
+    ? "Complete group"
+    : `Own ${ownedPropertyCount} of ${groupSize}`;
+}
+
+function renderDevelopmentMarkers(level: PropertyDevelopmentLevel) {
+  if (level === 0) {
+    return null;
+  }
+
+  const label = getDevelopmentLabel(level);
+
+  if (level === HOTEL_DEVELOPMENT_LEVEL) {
+    return (
+      <div
+        aria-label={label}
+        className="game-development-markers mt-1 flex"
+        title={label}
+      >
+        <span className="h-3 w-6 border border-[#171915] bg-[#f8961e]" />
+      </div>
+    );
+  }
+
+  return (
+    <div
+      aria-label={label}
+      className="game-development-markers mt-1 flex flex-wrap gap-0.5"
+      title={label}
+    >
+      {Array.from({ length: level }).map((_, houseIndex) => (
+        <span
+          aria-hidden="true"
+          className="h-2.5 w-2.5 border border-[#171915] bg-[#06d6a0]"
+          key={houseIndex}
+        />
+      ))}
+    </div>
+  );
 }
 
 function getNotFoundMessage(error: { code?: string } | null) {
@@ -180,6 +600,7 @@ export default function OnlineGamePage() {
   const [presenceNowMs, setPresenceNowMs] = useState(() => Date.now());
   const [errorMessage, setErrorMessage] = useState("");
   const [isLoading, setIsLoading] = useState(isConfigured);
+  const [isPropertiesModalOpen, setIsPropertiesModalOpen] = useState(false);
   const [isReconnecting, setIsReconnecting] = useState(false);
   const [isActing, setIsActing] = useState(false);
   const [isExpiringTurn, setIsExpiringTurn] = useState(false);
@@ -289,6 +710,43 @@ export default function OnlineGamePage() {
     !isActing;
   const canPlayAgain =
     Boolean(room && gameRow && isHost && winnerPlayer) && !isActing;
+  const ownedPropertyGroups =
+    gameState && localPlayer
+      ? Object.values(PROPERTY_GROUPS)
+          .map((group) => {
+            const properties: {
+              position: number;
+              space: OnlinePropertySpace;
+            }[] = [];
+
+            for (const position of group.propertyPositions) {
+              const space = ONLINE_BOARD_SPACES[position];
+
+              if (
+                isOnlinePropertySpace(space) &&
+                gameState.propertyOwners[String(position)] === localPlayer.id
+              ) {
+                properties.push({ position, space });
+              }
+            }
+
+            return {
+              group,
+              ownershipProgress: getOwnershipProgress(
+                properties.length,
+                group.propertyPositions.length,
+              ),
+              properties,
+            };
+          })
+          .filter((propertyGroup) => propertyGroup.properties.length > 0)
+      : [];
+  const ownedPropertyCount = ownedPropertyGroups.reduce(
+    (propertyCount, propertyGroup) => {
+      return propertyCount + propertyGroup.properties.length;
+    },
+    0,
+  );
 
   const loadRoom = useCallback(
     async (code: string) => {
@@ -398,6 +856,24 @@ export default function OnlineGamePage() {
     },
     [supabase],
   );
+
+  useEffect(() => {
+    if (!isPropertiesModalOpen) {
+      return;
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setIsPropertiesModalOpen(false);
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [isPropertiesModalOpen]);
 
   useEffect(() => {
     if (!supabase || !isConfigured) {
@@ -931,6 +1407,120 @@ export default function OnlineGamePage() {
     }
   }
 
+  async function buildDevelopment(position: number) {
+    if (!supabase || !room || !gameRow || !gameState || !localPlayer) {
+      return;
+    }
+
+    const space = ONLINE_BOARD_SPACES[position];
+
+    if (!isOnlinePropertySpace(space)) {
+      return;
+    }
+
+    const buildStatus = getBuildActionStatus({
+      gameState,
+      isActing,
+      isCurrentPlayer,
+      isTurnTimerExpired,
+      player: localPlayer,
+      position,
+      property: space,
+    });
+
+    if (!buildStatus.canAct) {
+      return;
+    }
+
+    setIsActing(true);
+    setErrorMessage("");
+
+    try {
+      const { data, error } = await supabase.rpc(
+        "build_online_property_development",
+        {
+          expected_version: gameRow.version,
+          property_position: position,
+          target_room_id: room.id,
+        },
+      );
+
+      if (error) {
+        throw error;
+      }
+
+      const parsedGameState = parseOnlineGameStateRow(data);
+
+      if (!parsedGameState) {
+        throw new Error("Online game state is invalid after building.");
+      }
+
+      setGameRow(parsedGameState);
+    } catch (error) {
+      setErrorMessage(getSafeSupabaseErrorMessage(error));
+      await loadGameState(room.id).catch(() => undefined);
+    } finally {
+      setIsActing(false);
+    }
+  }
+
+  async function sellDevelopment(position: number) {
+    if (!supabase || !room || !gameRow || !gameState || !localPlayer) {
+      return;
+    }
+
+    const space = ONLINE_BOARD_SPACES[position];
+
+    if (!isOnlinePropertySpace(space)) {
+      return;
+    }
+
+    const sellStatus = getSellActionStatus({
+      gameState,
+      isActing,
+      isCurrentPlayer,
+      isTurnTimerExpired,
+      player: localPlayer,
+      position,
+      property: space,
+    });
+
+    if (!sellStatus.canAct) {
+      return;
+    }
+
+    setIsActing(true);
+    setErrorMessage("");
+
+    try {
+      const { data, error } = await supabase.rpc(
+        "sell_online_property_development",
+        {
+          expected_version: gameRow.version,
+          property_position: position,
+          target_room_id: room.id,
+        },
+      );
+
+      if (error) {
+        throw error;
+      }
+
+      const parsedGameState = parseOnlineGameStateRow(data);
+
+      if (!parsedGameState) {
+        throw new Error("Online game state is invalid after selling.");
+      }
+
+      setGameRow(parsedGameState);
+    } catch (error) {
+      setErrorMessage(getSafeSupabaseErrorMessage(error));
+      await loadGameState(room.id).catch(() => undefined);
+    } finally {
+      setIsActing(false);
+    }
+  }
+
   async function playAgain() {
     if (!supabase || !room || !gameRow || !canPlayAgain) {
       return;
@@ -958,12 +1548,31 @@ export default function OnlineGamePage() {
     }
   }
 
+  function closePropertiesModal() {
+    setIsPropertiesModalOpen(false);
+  }
+
+  function handlePropertiesBackdropMouseDown(event: MouseEvent<HTMLDivElement>) {
+    if (event.target === event.currentTarget) {
+      closePropertiesModal();
+    }
+  }
+
   function renderPurchasePanel(space: OnlineBuyableSpace) {
     if (!gameState || !currentPlayer) {
       return null;
     }
 
     const isTransit = isOnlineTransitSpace(space);
+    const propertyGroup = isOnlinePropertySpace(space)
+      ? getPropertyGroup(space.groupId)
+      : null;
+    const propertyDevelopmentLevel = isOnlinePropertySpace(space)
+      ? getPropertyDevelopmentLevel(gameState, currentPlayer.position)
+      : 0;
+    const propertyRent = isOnlinePropertySpace(space)
+      ? getDevelopedPropertyRent(gameState, currentPlayer.position, space)
+      : 0;
     const isPendingPurchase =
       gameState.pendingPropertyPurchasePosition === currentPlayer.position;
     const owner = currentSpaceOwner;
@@ -973,7 +1582,7 @@ export default function OnlineGamePage() {
         : ONLINE_TRANSIT_RENTS[1];
     const rentLabel = isTransit ? "Transit Rent" : "Rent";
     const rentValue = isOnlinePropertySpace(space)
-      ? formatCurrency(space.rent)
+      ? formatCurrency(propertyRent)
       : owner
         ? formatCurrency(transitRent)
         : formatTransitRentTiers();
@@ -990,6 +1599,18 @@ export default function OnlineGamePage() {
               Space
             </p>
             <p className="break-words text-xl font-black">{space.name}</p>
+            {propertyGroup ? (
+              <div className="mt-2 flex items-center gap-2">
+                <span
+                  aria-hidden="true"
+                  className="h-4 w-12 border-2 border-[#171915]"
+                  style={{ backgroundColor: propertyGroup.color }}
+                />
+                <span className="text-xs font-black uppercase text-[#445045]">
+                  {propertyGroup.name}
+                </span>
+              </div>
+            ) : null}
           </div>
 
           <div className="grid grid-cols-3 gap-3">
@@ -1020,12 +1641,20 @@ export default function OnlineGamePage() {
           {owner ? (
             <p className="border-2 border-[#171915] bg-white p-3 text-sm font-bold leading-6 text-[#445045]">
               {owner.id === currentPlayer.id
-                ? `${currentPlayer.name} already owns ${space.name}.`
+                ? isOnlinePropertySpace(space)
+                  ? `${currentPlayer.name} already owns ${space.name} with ${getDevelopmentLabel(
+                      propertyDevelopmentLevel,
+                    )}.`
+                  : `${currentPlayer.name} already owns ${space.name}.`
                 : isTransit
                   ? `${space.name} is owned by ${owner.name}. ${currentPlayer.name} paid ${formatCurrency(
                       transitRent,
                     )} transit rent.`
-                  : `${space.name} is owned by ${owner.name}. Rent has been paid automatically.`}
+                  : `${space.name} is owned by ${owner.name}. ${currentPlayer.name} paid ${formatCurrency(
+                      propertyRent,
+                    )} rent with ${getDevelopmentLabel(
+                      propertyDevelopmentLevel,
+                    )}.`}
             </p>
           ) : isPendingPurchase ? (
             <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
@@ -1131,7 +1760,7 @@ export default function OnlineGamePage() {
   }
 
   return (
-    <main className="game-screen relative min-h-screen overflow-hidden bg-[#f7f8f4] px-5 py-8 text-[#171915] sm:px-8 sm:py-12">
+    <main className="game-screen online-game-screen relative min-h-screen overflow-hidden bg-[#f7f8f4] px-5 py-8 text-[#171915] sm:px-8 sm:py-12">
       <div
         aria-hidden="true"
         className="absolute inset-0 bg-[linear-gradient(90deg,rgba(23,25,21,0.05)_1px,transparent_1px),linear-gradient(rgba(23,25,21,0.05)_1px,transparent_1px)] bg-[size:44px_44px]"
@@ -1217,9 +1846,19 @@ export default function OnlineGamePage() {
               <div className="game-board grid aspect-square min-w-[620px] grid-cols-7 grid-rows-7 border-2 border-[#171915] bg-[#171915] shadow-[12px_12px_0_0_#f9c74f]">
                 {ONLINE_BOARD_SPACES.map((space, index) => {
                   const styles = onlineSpaceStyles[space.type];
+                  const propertyGroup = isOnlinePropertySpace(space)
+                    ? getPropertyGroup(space.groupId)
+                    : null;
+                  const developmentLevel = isOnlinePropertySpace(space)
+                    ? getPropertyDevelopmentLevel(gameState, index)
+                    : 0;
+                  const propertyRent = isOnlinePropertySpace(space)
+                    ? getDevelopedPropertyRent(gameState, index, space)
+                    : 0;
                   const spaceOwner = isOnlineBuyableSpace(space)
                     ? getSpaceOwner(gameState, index)
                     : null;
+                  const ownerFlagSide = getBoardSide(index);
                   const transitRent =
                     isOnlineTransitSpace(space) && spaceOwner
                       ? getTransitRent(
@@ -1243,7 +1882,9 @@ export default function OnlineGamePage() {
                       <span
                         aria-hidden="true"
                         className="game-board-accent absolute inset-x-0 top-0 h-1.5"
-                        style={{ backgroundColor: styles.accent }}
+                        style={{
+                          backgroundColor: propertyGroup?.color ?? styles.accent,
+                        }}
                       />
                       <span className="game-board-space-name pt-2 text-[0.66rem] font-black uppercase leading-tight sm:text-xs">
                         {space.name}
@@ -1251,24 +1892,21 @@ export default function OnlineGamePage() {
                       <span className="game-board-space-label text-[0.52rem] font-bold uppercase leading-tight text-[#596057] sm:text-[0.62rem]">
                         {styles.label}
                       </span>
+                      {propertyGroup ? (
+                        <span
+                          className="game-board-space-meta mt-1 block truncate border border-[#171915] px-1 py-0.5 text-[0.48rem] font-black uppercase leading-tight text-white sm:text-[0.55rem]"
+                          style={{ backgroundColor: propertyGroup.color }}
+                          title={propertyGroup.name}
+                        >
+                          {propertyGroup.name}
+                        </span>
+                      ) : null}
 
                       {isOnlineBuyableSpace(space) ? (
                         <div className="mt-1 space-y-0.5">
-                          {spaceOwner ? (
-                            <span
-                              className="game-board-space-meta block truncate border border-[#171915] px-1 py-0.5 text-[0.5rem] font-black uppercase leading-tight text-white sm:text-[0.58rem]"
-                              title={`Owner: ${spaceOwner.name}`}
-                              style={{
-                                backgroundColor: spaceOwner.color,
-                              }}
-                            >
-                              Owner: {spaceOwner.name}
-                            </span>
-                          ) : (
-                            <span className="game-board-space-meta block text-[0.5rem] font-black leading-tight text-[#445045] sm:text-[0.58rem]">
-                              Price {formatCurrency(space.price)}
-                            </span>
-                          )}
+                          <span className="game-board-space-meta block text-[0.5rem] font-black leading-tight text-[#445045] sm:text-[0.58rem]">
+                            Price {formatCurrency(space.price)}
+                          </span>
                           <span className="game-board-space-meta block text-[0.5rem] font-black leading-tight text-[#445045] sm:text-[0.58rem]">
                             {isOnlineTransitSpace(space)
                               ? `Rent ${
@@ -1276,13 +1914,46 @@ export default function OnlineGamePage() {
                                     ? formatCurrency(transitRent)
                                     : formatTransitRentTiers("/")
                                 }`
-                              : `Rent ${formatCurrency(space.rent)}`}
+                              : `Rent ${formatCurrency(propertyRent)}`}
                           </span>
+                          {isOnlinePropertySpace(space) && spaceOwner ? (
+                            <span className="game-board-space-meta block text-[0.5rem] font-black leading-tight text-[#445045] sm:text-[0.58rem]">
+                              {getDevelopmentLabel(developmentLevel)}
+                            </span>
+                          ) : null}
+                          {isOnlineTransitSpace(space) && spaceOwner ? (
+                            <span className="game-board-space-meta block text-[0.5rem] font-black leading-tight text-[#445045] sm:text-[0.58rem]">
+                              {getOwnedTransitCount(gameState, spaceOwner.id)}{" "}
+                              station
+                              {getOwnedTransitCount(gameState, spaceOwner.id) ===
+                              1
+                                ? ""
+                                : "s"}
+                            </span>
+                          ) : null}
                         </div>
                       ) : isOnlineTaxSpace(space) ? (
                         <div className="game-board-space-meta mt-1 text-[0.55rem] font-black leading-tight text-[#445045] sm:text-[0.62rem]">
                           Pay {formatCurrency(space.taxAmount)}
                         </div>
+                      ) : null}
+
+                      {isOnlinePropertySpace(space)
+                        ? renderDevelopmentMarkers(developmentLevel)
+                        : null}
+
+                      {isOnlineBuyableSpace(space) && spaceOwner ? (
+                        <span
+                          aria-label={`Owned by ${spaceOwner.name}`}
+                          className={`game-board-owner-flag game-board-owner-flag-${ownerFlagSide}`}
+                          role="img"
+                          style={
+                            {
+                              "--owner-flag-color": spaceOwner.color,
+                            } as CSSProperties
+                          }
+                          title={`Owned by ${spaceOwner.name}`}
+                        />
                       ) : null}
 
                       {playersOnSpace.length > 0 ? (
@@ -1543,6 +2214,33 @@ export default function OnlineGamePage() {
             ) : null}
 
             <button
+              className="flex h-14 items-center justify-center gap-2 border-2 border-[#171915] bg-white px-4 text-base font-bold text-[#171915] shadow-[8px_8px_0_0_#171915] transition-transform hover:-translate-y-0.5 focus:outline-none focus:ring-4 focus:ring-[#06d6a0]/35 disabled:cursor-not-allowed disabled:bg-[#c6cbbf] disabled:text-[#596057] disabled:opacity-70 disabled:shadow-none"
+              disabled={!gameState || !localPlayer || isActing}
+              onClick={() => setIsPropertiesModalOpen(true)}
+              type="button"
+            >
+              <svg
+                aria-hidden="true"
+                className="h-5 w-5 shrink-0"
+                fill="none"
+                stroke="currentColor"
+                strokeLinecap="square"
+                strokeLinejoin="miter"
+                strokeWidth="2.5"
+                viewBox="0 0 24 24"
+              >
+                <path d="M4 20V9l8-5 8 5v11" />
+                <path d="M8 20v-6h8v6" />
+                <path d="M7 10h2" />
+                <path d="M15 10h2" />
+              </svg>
+              <span>My Properties</span>
+              <span className="rounded-full border-2 border-[#171915] bg-[#f9c74f] px-2 py-0.5 text-xs font-black leading-none">
+                {ownedPropertyCount}
+              </span>
+            </button>
+
+            <button
               className="h-14 border-2 border-[#171915] bg-[#ef476f] px-6 text-base font-bold text-white shadow-[8px_8px_0_0_#171915] transition-transform hover:-translate-y-0.5 focus:outline-none focus:ring-4 focus:ring-[#ef476f]/35"
               onClick={exitGame}
               type="button"
@@ -1565,6 +2263,217 @@ export default function OnlineGamePage() {
           ) : null}
         </aside>
       </section>
+
+      {isPropertiesModalOpen && gameState && localPlayer ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-[#171915]/60 px-4 py-6 backdrop-blur-sm"
+          onMouseDown={handlePropertiesBackdropMouseDown}
+        >
+          <section
+            aria-labelledby="online-my-properties-title"
+            aria-modal="true"
+            className="game-properties-modal flex max-h-[min(88vh,760px)] w-full max-w-5xl flex-col border-2 border-[#171915] bg-white shadow-[12px_12px_0_0_#06d6a0]"
+            role="dialog"
+          >
+            <div className="flex items-start justify-between gap-4 border-b-2 border-[#171915] bg-[#f7f8f4] p-4">
+              <div>
+                <p className="text-sm font-black uppercase text-[#596057]">
+                  {localPlayer.name}
+                </p>
+                <h2
+                  className="text-3xl font-black leading-none"
+                  id="online-my-properties-title"
+                >
+                  My Properties
+                </h2>
+              </div>
+
+              <button
+                className="h-11 border-2 border-[#171915] bg-white px-4 text-sm font-black text-[#171915] shadow-[4px_4px_0_0_#171915] transition-transform hover:-translate-y-0.5 focus:outline-none focus:ring-4 focus:ring-[#ef476f]/35"
+                onClick={closePropertiesModal}
+                type="button"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="game-properties-modal-body flex-1 overflow-y-auto p-4">
+              {ownedPropertyGroups.length === 0 ? (
+                <div className="border-2 border-[#171915] bg-[#f7f8f4] p-5">
+                  <p className="text-xl font-black">
+                    No properties owned yet.
+                  </p>
+                  <p className="mt-2 text-sm font-bold leading-6 text-[#445045]">
+                    Buy a property during your online turn to start developing
+                    a color group.
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {ownedPropertyGroups.map(
+                    ({ group, ownershipProgress, properties }) => (
+                      <section
+                        className="border-2 border-[#171915] bg-[#f7f8f4]"
+                        key={group.id}
+                      >
+                        <div className="flex flex-col gap-3 border-b-2 border-[#171915] bg-white p-3 sm:flex-row sm:items-center sm:justify-between">
+                          <div className="min-w-0">
+                            <p className="break-words text-xl font-black">
+                              {group.name}
+                            </p>
+                            <p className="mt-1 text-xs font-black uppercase text-[#596057]">
+                              {ownershipProgress}
+                            </p>
+                          </div>
+                          <span
+                            aria-hidden="true"
+                            className="h-5 w-full border-2 border-[#171915] sm:w-20"
+                            style={{ backgroundColor: group.color }}
+                          />
+                        </div>
+
+                        <div className="grid gap-3 p-3 lg:grid-cols-2">
+                          {properties.map(({ position, space }) => {
+                            const level = getPropertyDevelopmentLevel(
+                              gameState,
+                              position,
+                            );
+                            const nextLevel = getNextDevelopmentLevel(level);
+                            const currentRent = getDevelopedPropertyRent(
+                              gameState,
+                              position,
+                              space,
+                            );
+                            const nextRent =
+                              nextLevel === null
+                                ? null
+                                : getPropertyRent(position, nextLevel);
+                            const buildStatus = getBuildActionStatus({
+                              gameState,
+                              isActing,
+                              isCurrentPlayer,
+                              isTurnTimerExpired,
+                              player: localPlayer,
+                              position,
+                              property: space,
+                            });
+                            const sellStatus = getSellActionStatus({
+                              gameState,
+                              isActing,
+                              isCurrentPlayer,
+                              isTurnTimerExpired,
+                              player: localPlayer,
+                              position,
+                              property: space,
+                            });
+
+                            return (
+                              <article
+                                className="border-2 border-[#171915] bg-white p-3"
+                                key={space.name}
+                              >
+                                <div className="flex items-start justify-between gap-3">
+                                  <div className="min-w-0">
+                                    <p className="break-words text-lg font-black">
+                                      {space.name}
+                                    </p>
+                                    <p className="mt-1 text-xs font-black uppercase text-[#596057]">
+                                      {group.name}
+                                    </p>
+                                  </div>
+                                  <span
+                                    aria-hidden="true"
+                                    className="h-5 w-12 shrink-0 border-2 border-[#171915]"
+                                    style={{ backgroundColor: group.color }}
+                                  />
+                                </div>
+
+                                <div className="mt-3 grid grid-cols-2 gap-2 text-sm font-bold text-[#445045]">
+                                  <p>
+                                    <span className="block text-xs font-black uppercase text-[#596057]">
+                                      Development
+                                    </span>
+                                    {getDevelopmentLabel(level)}
+                                  </p>
+                                  <p>
+                                    <span className="block text-xs font-black uppercase text-[#596057]">
+                                      Current Rent
+                                    </span>
+                                    {formatCurrency(currentRent)}
+                                  </p>
+                                  <p>
+                                    <span className="block text-xs font-black uppercase text-[#596057]">
+                                      Next Rent
+                                    </span>
+                                    {nextRent === null
+                                      ? "Maxed"
+                                      : formatCurrency(nextRent)}
+                                  </p>
+                                  <p>
+                                    <span className="block text-xs font-black uppercase text-[#596057]">
+                                      Build Cost
+                                    </span>
+                                    {formatCurrency(group.buildCost)}
+                                  </p>
+                                  <p>
+                                    <span className="block text-xs font-black uppercase text-[#596057]">
+                                      Sell Value
+                                    </span>
+                                    {formatCurrency(
+                                      getDevelopmentSaleValue(group),
+                                    )}
+                                  </p>
+                                  <p>
+                                    <span className="block text-xs font-black uppercase text-[#596057]">
+                                      Ownership
+                                    </span>
+                                    {ownershipProgress}
+                                  </p>
+                                </div>
+
+                                <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                                  <button
+                                    className="min-h-11 border-2 border-[#171915] bg-[#06d6a0] px-3 py-2 text-sm font-black text-[#171915] shadow-[4px_4px_0_0_#171915] transition-transform hover:-translate-y-0.5 focus:outline-none focus:ring-4 focus:ring-[#06d6a0]/35 disabled:cursor-not-allowed disabled:bg-[#c6cbbf] disabled:text-[#596057] disabled:shadow-none"
+                                    disabled={!buildStatus.canAct}
+                                    onClick={() => buildDevelopment(position)}
+                                    type="button"
+                                  >
+                                    {isActing ? "Submitting..." : buildStatus.label}
+                                  </button>
+
+                                  <button
+                                    className="min-h-11 border-2 border-[#171915] bg-white px-3 py-2 text-sm font-black text-[#171915] shadow-[4px_4px_0_0_#ef476f] transition-transform hover:-translate-y-0.5 focus:outline-none focus:ring-4 focus:ring-[#ef476f]/35 disabled:cursor-not-allowed disabled:bg-[#c6cbbf] disabled:text-[#596057] disabled:shadow-none"
+                                    disabled={!sellStatus.canAct}
+                                    onClick={() => sellDevelopment(position)}
+                                    type="button"
+                                  >
+                                    {isActing ? "Submitting..." : sellStatus.label}
+                                  </button>
+                                </div>
+
+                                {buildStatus.reason || sellStatus.reason ? (
+                                  <div className="mt-3 space-y-2 text-xs font-bold leading-5 text-[#596057]">
+                                    {buildStatus.reason ? (
+                                      <p>Build unavailable: {buildStatus.reason}</p>
+                                    ) : null}
+                                    {sellStatus.reason ? (
+                                      <p>Sell unavailable: {sellStatus.reason}</p>
+                                    ) : null}
+                                  </div>
+                                ) : null}
+                              </article>
+                            );
+                          })}
+                        </div>
+                      </section>
+                    ),
+                  )}
+                </div>
+              )}
+            </div>
+          </section>
+        </div>
+      ) : null}
     </main>
   );
 }

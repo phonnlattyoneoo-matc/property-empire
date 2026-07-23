@@ -1,3 +1,5 @@
+import type { PropertyGroupId } from "@/lib/property-development";
+
 export type OnlineSpaceType =
   | "start"
   | "property"
@@ -8,6 +10,7 @@ export type OnlineSpaceType =
   | "detention";
 
 export type OnlineBoardSpace = {
+  groupId?: PropertyGroupId;
   name: string;
   price?: number;
   rent?: number;
@@ -20,32 +23,99 @@ export const ONLINE_TRANSIT_RENTS = [0, 25, 50, 100];
 
 export const ONLINE_BOARD_SPACES: OnlineBoardSpace[] = [
   { name: "Grand Plaza", type: "start" },
-  { name: "CoLab Court", type: "property", price: 120, rent: 12 },
+  {
+    groupId: "growth-lab",
+    name: "CoLab Court",
+    type: "property",
+    price: 120,
+    rent: 12,
+  },
   { name: "City Tax", type: "tax", taxAmount: 150 },
-  { name: "Pixel Row", type: "property", price: 140, rent: 14 },
+  {
+    groupId: "growth-lab",
+    name: "Pixel Row",
+    type: "property",
+    price: 140,
+    rent: 14,
+  },
   { name: "Metro Loop", type: "transit", price: ONLINE_TRANSIT_PRICE },
   { name: "Pop-Up Market", type: "event" },
-  { name: "Skyline Lofts", type: "property", price: 180, rent: 18 },
-  { name: "Canal Walk", type: "property", price: 200, rent: 20 },
-  { name: "Maker Lane", type: "property", price: 220, rent: 22 },
+  {
+    groupId: "urban-makers",
+    name: "Skyline Lofts",
+    type: "property",
+    price: 180,
+    rent: 18,
+  },
+  {
+    groupId: "urban-makers",
+    name: "Canal Walk",
+    type: "property",
+    price: 200,
+    rent: 20,
+  },
+  {
+    groupId: "urban-makers",
+    name: "Maker Lane",
+    type: "property",
+    price: 220,
+    rent: 22,
+  },
   { name: "Harbor Line", type: "transit", price: ONLINE_TRANSIT_PRICE },
   { name: "Street Fest", type: "event" },
-  { name: "Glass Tower", type: "property", price: 260, rent: 26 },
+  {
+    groupId: "civic-lights",
+    name: "Glass Tower",
+    type: "property",
+    price: 260,
+    rent: 26,
+  },
   { name: "Civic Detention", type: "detention" },
-  { name: "Greenway Flats", type: "property", price: 240, rent: 24 },
+  {
+    groupId: "civic-lights",
+    name: "Greenway Flats",
+    type: "property",
+    price: 240,
+    rent: 24,
+  },
   { name: "Grid Levy", type: "tax", taxAmount: 100 },
   { name: "Central Rail", type: "transit", price: ONLINE_TRANSIT_PRICE },
-  { name: "Neon Arcade", type: "property", price: 280, rent: 28 },
+  {
+    groupId: "civic-lights",
+    name: "Neon Arcade",
+    type: "property",
+    price: 280,
+    rent: 28,
+  },
   { name: "City Vote", type: "event" },
   { name: "Rooftop Rest", type: "rest" },
-  { name: "Market Hall", type: "property", price: 320, rent: 32 },
-  { name: "Riverfront", type: "property", price: 360, rent: 36 },
+  {
+    groupId: "waterfront-exchange",
+    name: "Market Hall",
+    type: "property",
+    price: 320,
+    rent: 32,
+  },
+  {
+    groupId: "waterfront-exchange",
+    name: "Riverfront",
+    type: "property",
+    price: 360,
+    rent: 36,
+  },
   { name: "Bike Hub", type: "transit", price: ONLINE_TRANSIT_PRICE },
   { name: "Night Market", type: "event" },
-  { name: "Depot Flats", type: "property", price: 300, rent: 30 },
+  {
+    groupId: "waterfront-exchange",
+    name: "Depot Flats",
+    type: "property",
+    price: 300,
+    rent: 30,
+  },
 ];
 
 export type OnlinePropertySpace = OnlineBoardSpace & {
+  groupId: PropertyGroupId;
   price: number;
   rent: number;
   type: "property";
@@ -56,6 +126,7 @@ export function isOnlinePropertySpace(
 ): space is OnlinePropertySpace {
   return (
     space.type === "property" &&
+    typeof space.groupId === "string" &&
     typeof space.price === "number" &&
     typeof space.rent === "number"
   );

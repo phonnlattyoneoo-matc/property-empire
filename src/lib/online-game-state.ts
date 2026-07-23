@@ -6,7 +6,9 @@ import {
 import {
   ONLINE_BOARD_SPACES,
   isOnlineBuyableSpace,
+  isOnlinePropertySpace,
 } from "@/lib/online-board";
+import type { PropertyDevelopmentLevel } from "@/lib/property-development";
 
 export type OnlineGamePlayer = {
   id: string;
@@ -32,6 +34,10 @@ export type OnlineResolvedEventCard = {
 };
 
 export type OnlinePropertyOwners = Record<string, string>;
+export type OnlinePropertyDevelopments = Record<
+  string,
+  PropertyDevelopmentLevel
+>;
 
 export type OnlineActivityLogEntry = {
   createdAt: string;
@@ -51,6 +57,7 @@ export type OnlineGameState = {
   lastRoll: OnlineDiceRoll | null;
   message: string;
   pendingPropertyPurchasePosition: number | null;
+  propertyDevelopments: OnlinePropertyDevelopments;
   phase: "online_game";
   players: OnlineGamePlayer[];
   propertyOwners: OnlinePropertyOwners;
@@ -147,6 +154,15 @@ function parseOnlineGameState(state: unknown): OnlineGameState | null {
     state.propertyOwners,
     players,
   );
+
+  if (!propertyOwners) {
+    return null;
+  }
+
+  const propertyDevelopments = parseOnlinePropertyDevelopments(
+    state.propertyDevelopments,
+    propertyOwners,
+  );
   const activityLog = parseOnlineActivityLog(state.activityLog);
   const winnerPlayerId = parseWinnerPlayerId(state.winnerPlayerId, players);
   const turnDeadlineAt = parseTurnDeadlineAt(state.turnDeadlineAt);
@@ -158,7 +174,7 @@ function parseOnlineGameState(state: unknown): OnlineGameState | null {
   if (
     lastRoll === undefined ||
     lastEventCard === undefined ||
-    !propertyOwners ||
+    !propertyDevelopments ||
     !activityLog ||
     winnerPlayerId === undefined ||
     turnDeadlineAt === undefined ||
@@ -215,6 +231,7 @@ function parseOnlineGameState(state: unknown): OnlineGameState | null {
     pendingPropertyPurchasePosition,
     phase: "online_game",
     players,
+    propertyDevelopments,
     propertyOwners,
     turnDeadlineAt,
     winnerPlayerId,
@@ -397,6 +414,48 @@ function parseOnlineActivityLog(
   }
 
   return parsedActivityLog;
+}
+
+function parseOnlinePropertyDevelopments(
+  propertyDevelopments: unknown,
+  propertyOwners: OnlinePropertyOwners,
+): OnlinePropertyDevelopments | null {
+  if (propertyDevelopments === undefined) {
+    return {};
+  }
+
+  if (!isRecord(propertyDevelopments)) {
+    return null;
+  }
+
+  const parsedPropertyDevelopments: OnlinePropertyDevelopments = {};
+
+  for (const [position, developmentLevel] of Object.entries(
+    propertyDevelopments,
+  )) {
+    const numericPosition = Number(position);
+    const boardSpace = ONLINE_BOARD_SPACES[numericPosition];
+
+    if (
+      !Number.isInteger(numericPosition) ||
+      numericPosition < 0 ||
+      numericPosition >= BOARD_SPACE_COUNT ||
+      !boardSpace ||
+      !isOnlinePropertySpace(boardSpace) ||
+      typeof developmentLevel !== "number" ||
+      !Number.isInteger(developmentLevel) ||
+      developmentLevel < 0 ||
+      developmentLevel > 5 ||
+      (developmentLevel > 0 && !propertyOwners[position])
+    ) {
+      return null;
+    }
+
+    parsedPropertyDevelopments[position] =
+      developmentLevel as PropertyDevelopmentLevel;
+  }
+
+  return parsedPropertyDevelopments;
 }
 
 function parseWinnerPlayerId(
