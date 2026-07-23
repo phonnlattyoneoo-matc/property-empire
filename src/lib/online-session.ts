@@ -12,9 +12,9 @@ import {
 } from "@/lib/online-room";
 
 const ONLINE_SESSION_STORAGE_KEY = "property-empire-online-session-v1";
-export const ONLINE_HEARTBEAT_INTERVAL_MS = 7_000;
-export const ONLINE_RECONNECTING_AFTER_MS = 12_000;
-export const ONLINE_OFFLINE_AFTER_MS = 20_000;
+export const ONLINE_HEARTBEAT_INTERVAL_MS = 20_000;
+export const ONLINE_RECONNECTING_AFTER_MS = 30_000;
+export const ONLINE_OFFLINE_AFTER_MS = 45_000;
 
 export type OnlineConnectionStatus =
   | "Connected"

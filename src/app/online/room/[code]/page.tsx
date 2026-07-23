@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import type { RealtimeChannel } from "@supabase/supabase-js";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ensureAnonymousUser,
   getSupabaseBrowserClient,
@@ -13,6 +13,8 @@ import { getSafeSupabaseErrorMessage } from "@/lib/supabase/error-message";
 import {
   MAX_ONLINE_PLAYERS,
   MIN_ONLINE_PLAYERS,
+  mergeOnlineRoomPlayerRealtimePayload,
+  parseOnlineRoom,
   sanitizeRoomCode,
   sortOnlineRoomPlayers,
   type OnlineRoom,
@@ -54,6 +56,8 @@ export default function OnlineRoomPage() {
   const router = useRouter();
   const roomCode = sanitizeRoomCode(params.code ?? "");
   const supabase = useMemo(() => getSupabaseBrowserClient(), []);
+  const heartbeatInFlightRef = useRef(false);
+  const lastHeartbeatSentAtRef = useRef(0);
   const isConfigured = hasSupabaseConfig();
   const [currentUserId, setCurrentUserId] = useState("");
   const [room, setRoom] = useState<OnlineRoom | null>(null);
@@ -252,11 +256,35 @@ export default function OnlineRoomPage() {
     }
 
     let isActive = true;
+    const activeSupabase = supabase;
     const activeSession = storedOnlineSession;
 
-    async function sendHeartbeat() {
+    async function sendHeartbeat({ force = false }: { force?: boolean } = {}) {
+      if (!force && document.visibilityState === "hidden") {
+        return;
+      }
+
+      const nowMs = Date.now();
+
+      if (
+        heartbeatInFlightRef.current ||
+        (!force &&
+          nowMs - lastHeartbeatSentAtRef.current <
+            ONLINE_HEARTBEAT_INTERVAL_MS)
+      ) {
+        return;
+      }
+
+      heartbeatInFlightRef.current = true;
+
       try {
-        await heartbeatOnlineSession(supabase!, activeSession);
+        await heartbeatOnlineSession(activeSupabase, activeSession);
+
+        if (!isActive) {
+          return;
+        }
+
+        lastHeartbeatSentAtRef.current = Date.now();
         setPresenceNowMs(Date.now());
       } catch (error) {
         if (!isActive) {
@@ -268,10 +296,12 @@ export default function OnlineRoomPage() {
           setStoredOnlineSession(null);
           setErrorMessage(getSafeSupabaseErrorMessage(error));
         }
+      } finally {
+        heartbeatInFlightRef.current = false;
       }
     }
 
-    void sendHeartbeat();
+    void sendHeartbeat({ force: document.visibilityState === "visible" });
 
     const heartbeatIntervalId = window.setInterval(
       () => void sendHeartbeat(),
@@ -284,62 +314,87 @@ export default function OnlineRoomPage() {
       }
     }
 
+    function handleFocus() {
+      void sendHeartbeat();
+    }
+
     document.addEventListener("visibilitychange", handleVisibilityChange);
-    window.addEventListener("focus", sendHeartbeat);
+    window.addEventListener("focus", handleFocus);
 
     return () => {
       isActive = false;
       window.clearInterval(heartbeatIntervalId);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
-      window.removeEventListener("focus", sendHeartbeat);
+      window.removeEventListener("focus", handleFocus);
     };
   }, [currentUserId, room, storedOnlineSession, supabase]);
 
   useEffect(() => {
-    if (!supabase || !room?.id) {
+    const activeRoomCode = room?.code ?? null;
+    const activeRoomId = room?.id ?? null;
+
+    if (!supabase || !activeRoomCode || !activeRoomId) {
       return;
     }
 
     const channel: RealtimeChannel = supabase
-      .channel(`property-empire-room-${room.id}`)
+      .channel(`property-empire-room-${activeRoomId}`)
       .on(
         "postgres_changes",
         {
           event: "*",
-          filter: `room_id=eq.${room.id}`,
+          filter: `room_id=eq.${activeRoomId}`,
           schema: "public",
           table: "room_players",
         },
-        () => {
-          void loadPlayers(room.id)
-            .then((loadedPlayers) => {
-              if (!loadedPlayers || !currentUserId) {
-                return;
-              }
+        (payload) => {
+          setPlayers((currentPlayers) => {
+            const nextPlayers = mergeOnlineRoomPlayerRealtimePayload(
+              currentPlayers,
+              payload,
+            );
 
-              const savedSession = saveOnlineSessionFromPlayers(
-                room,
-                loadedPlayers,
-                currentUserId,
-              );
+            if (!nextPlayers) {
+              void loadPlayers(activeRoomId).catch((error: unknown) => {
+                setErrorMessage(getSafeSupabaseErrorMessage(error));
+              });
 
-              setStoredOnlineSession(savedSession);
-            })
-            .catch((error: unknown) => {
-              setErrorMessage(getSafeSupabaseErrorMessage(error));
+              return currentPlayers;
+            }
+
+            return nextPlayers.filter((player) => {
+              return player.room_id === activeRoomId;
             });
+          });
         },
       )
       .on(
         "postgres_changes",
         {
           event: "UPDATE",
-          filter: `id=eq.${room.id}`,
+          filter: `id=eq.${activeRoomId}`,
           schema: "public",
           table: "rooms",
         },
-        () => {
-          void loadRoom(room.code);
+        (payload) => {
+          const updatedRoom = parseOnlineRoom(payload.new);
+
+          if (!updatedRoom || updatedRoom.id !== activeRoomId) {
+            void loadRoom(activeRoomCode).catch((error: unknown) => {
+              setErrorMessage(getSafeSupabaseErrorMessage(error));
+            });
+            return;
+          }
+
+          if (updatedRoom.status === "closed") {
+            clearOnlineSession(updatedRoom.code);
+            setStoredOnlineSession(null);
+            setRoom(null);
+            setErrorMessage("This online room has been closed.");
+            return;
+          }
+
+          setRoom(updatedRoom);
         },
       )
       .subscribe();
@@ -347,7 +402,7 @@ export default function OnlineRoomPage() {
     return () => {
       void supabase.removeChannel(channel);
     };
-  }, [currentUserId, loadPlayers, loadRoom, room, supabase]);
+  }, [loadPlayers, loadRoom, room?.code, room?.id, supabase]);
 
   useEffect(() => {
     if (room?.status === "started") {

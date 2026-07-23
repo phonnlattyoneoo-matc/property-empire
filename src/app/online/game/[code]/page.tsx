@@ -27,6 +27,8 @@ import {
   type OnlineGameStateRow,
 } from "@/lib/online-game-state";
 import {
+  mergeOnlineRoomPlayerRealtimePayload,
+  parseOnlineRoom,
   sanitizeRoomCode,
   sortOnlineRoomPlayers,
   type OnlineRoom,
@@ -1002,7 +1004,9 @@ export default function OnlineGamePage() {
   const animationSequenceRef = useRef(0);
   const dicePreviewIntervalRef = useRef<number | null>(null);
   const gameRowRef = useRef<OnlineGameStateRow | null>(null);
+  const heartbeatInFlightRef = useRef(false);
   const landingToastTimeoutRef = useRef<number | null>(null);
+  const lastHeartbeatSentAtRef = useRef(0);
   const lastAnimatedVersionRef = useRef<number | null>(null);
   const rentAnimationTimeoutRef = useRef<number | null>(null);
   const roomCode = sanitizeRoomCode(params.code ?? "");
@@ -1442,6 +1446,14 @@ export default function OnlineGamePage() {
         return;
       }
 
+      if (
+        previousRow &&
+        nextRow.version === previousRow.version &&
+        nextRow.updated_at === previousRow.updated_at
+      ) {
+        return;
+      }
+
       const shouldAnimate =
         options.animate !== false &&
         previousRow !== null &&
@@ -1797,11 +1809,35 @@ export default function OnlineGamePage() {
     }
 
     let isActive = true;
+    const activeSupabase = supabase;
     const activeSession = storedOnlineSession;
 
-    async function sendHeartbeat() {
+    async function sendHeartbeat({ force = false }: { force?: boolean } = {}) {
+      if (!force && document.visibilityState === "hidden") {
+        return;
+      }
+
+      const nowMs = Date.now();
+
+      if (
+        heartbeatInFlightRef.current ||
+        (!force &&
+          nowMs - lastHeartbeatSentAtRef.current <
+            ONLINE_HEARTBEAT_INTERVAL_MS)
+      ) {
+        return;
+      }
+
+      heartbeatInFlightRef.current = true;
+
       try {
-        await heartbeatOnlineSession(supabase!, activeSession);
+        await heartbeatOnlineSession(activeSupabase, activeSession);
+
+        if (!isActive) {
+          return;
+        }
+
+        lastHeartbeatSentAtRef.current = Date.now();
         setPresenceNowMs(Date.now());
       } catch (error) {
         if (!isActive) {
@@ -1816,10 +1852,12 @@ export default function OnlineGamePage() {
           setRoomPlayers([]);
           setErrorMessage(getSafeSupabaseErrorMessage(error));
         }
+      } finally {
+        heartbeatInFlightRef.current = false;
       }
     }
 
-    void sendHeartbeat();
+    void sendHeartbeat({ force: document.visibilityState === "visible" });
 
     const heartbeatIntervalId = window.setInterval(
       () => void sendHeartbeat(),
@@ -1832,14 +1870,18 @@ export default function OnlineGamePage() {
       }
     }
 
+    function handleFocus() {
+      void sendHeartbeat();
+    }
+
     document.addEventListener("visibilitychange", handleVisibilityChange);
-    window.addEventListener("focus", sendHeartbeat);
+    window.addEventListener("focus", handleFocus);
 
     return () => {
       isActive = false;
       window.clearInterval(heartbeatIntervalId);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
-      window.removeEventListener("focus", sendHeartbeat);
+      window.removeEventListener("focus", handleFocus);
     };
   }, [clearGameRowState, currentUserId, room, storedOnlineSession, supabase]);
 
@@ -1922,24 +1964,34 @@ export default function OnlineGamePage() {
   ]);
 
   useEffect(() => {
-    if (!supabase || !room?.id) {
+    const activeRoomCode = room?.code ?? null;
+    const activeRoomId = room?.id ?? null;
+
+    if (!supabase || !activeRoomCode || !activeRoomId) {
       return;
     }
 
     const channel: RealtimeChannel = supabase
-      .channel(`property-empire-online-game-${room.id}`)
+      .channel(`property-empire-online-game-${activeRoomId}`)
       .on(
         "postgres_changes",
         {
           event: "*",
-          filter: `room_id=eq.${room.id}`,
+          filter: `room_id=eq.${activeRoomId}`,
           schema: "public",
           table: "game_states",
         },
-        () => {
-          void loadGameState(room.id).catch((error: unknown) => {
+        (payload) => {
+          const parsedGameState = parseOnlineGameStateRow(payload.new);
+
+          if (parsedGameState) {
+            applyGameRowUpdate(parsedGameState);
+            return;
+          }
+
+          void loadGameState(activeRoomId).catch((error: unknown) => {
             if (isPermanentOnlineSessionError(error)) {
-              clearOnlineSession(room.code);
+              clearOnlineSession(activeRoomCode);
               setStoredOnlineSession(null);
               setRoom(null);
               clearGameRowState();
@@ -1953,13 +2005,28 @@ export default function OnlineGamePage() {
         "postgres_changes",
         {
           event: "*",
-          filter: `room_id=eq.${room.id}`,
+          filter: `room_id=eq.${activeRoomId}`,
           schema: "public",
           table: "room_players",
         },
-        () => {
-          void loadRoomPlayers(room.id).catch((error: unknown) => {
-            setErrorMessage(getSafeSupabaseErrorMessage(error));
+        (payload) => {
+          setRoomPlayers((currentPlayers) => {
+            const nextPlayers = mergeOnlineRoomPlayerRealtimePayload(
+              currentPlayers,
+              payload,
+            );
+
+            if (!nextPlayers) {
+              void loadRoomPlayers(activeRoomId).catch((error: unknown) => {
+                setErrorMessage(getSafeSupabaseErrorMessage(error));
+              });
+
+              return currentPlayers;
+            }
+
+            return nextPlayers.filter((player) => {
+              return player.room_id === activeRoomId;
+            });
           });
         },
       )
@@ -1967,14 +2034,30 @@ export default function OnlineGamePage() {
         "postgres_changes",
         {
           event: "UPDATE",
-          filter: `id=eq.${room.id}`,
+          filter: `id=eq.${activeRoomId}`,
           schema: "public",
           table: "rooms",
         },
-        () => {
-          void loadRoom(room.code).catch((error: unknown) => {
+        (payload) => {
+          const updatedRoom = parseOnlineRoom(payload.new);
+
+          if (updatedRoom && updatedRoom.id === activeRoomId) {
+            if (updatedRoom.status === "closed") {
+              clearOnlineSession(updatedRoom.code);
+              setStoredOnlineSession(null);
+              setRoom(null);
+              clearGameRowState();
+              setErrorMessage("This online room has been closed.");
+              return;
+            }
+
+            setRoom(updatedRoom);
+            return;
+          }
+
+          void loadRoom(activeRoomCode).catch((error: unknown) => {
             if (isPermanentOnlineSessionError(error)) {
-              clearOnlineSession(room.code);
+              clearOnlineSession(activeRoomCode);
               setStoredOnlineSession(null);
               setRoom(null);
               clearGameRowState();
@@ -1989,7 +2072,16 @@ export default function OnlineGamePage() {
     return () => {
       void supabase.removeChannel(channel);
     };
-  }, [clearGameRowState, loadGameState, loadRoom, loadRoomPlayers, room, supabase]);
+  }, [
+    applyGameRowUpdate,
+    clearGameRowState,
+    loadGameState,
+    loadRoom,
+    loadRoomPlayers,
+    room?.code,
+    room?.id,
+    supabase,
+  ]);
 
   useEffect(() => {
     if (room && room.status !== "started") {
