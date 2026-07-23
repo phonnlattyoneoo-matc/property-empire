@@ -3,7 +3,7 @@
 import { useParams, useRouter } from "next/navigation";
 import type { CSSProperties, MouseEvent } from "react";
 import type { RealtimeChannel } from "@supabase/supabase-js";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   BOARD_SPACE_COUNT,
   CITY_LAUNCH_BONUS,
@@ -23,6 +23,7 @@ import {
 import {
   parseOnlineGameStateRow,
   type OnlineGameState,
+  type OnlineDiceRoll,
   type OnlineGamePlayer,
   type OnlineGameStateRow,
 } from "@/lib/online-game-state";
@@ -63,6 +64,7 @@ import {
 import { getSafeSupabaseErrorMessage } from "@/lib/supabase/error-message";
 
 type BoardSide = "bottom" | "left" | "right" | "top";
+type InteractionPhase = "idle" | "rolling" | "moving" | "resolving";
 
 type DevelopmentActionStatus = {
   canAct: boolean;
@@ -70,6 +72,22 @@ type DevelopmentActionStatus = {
   nextLevel: PropertyDevelopmentLevel | null;
   reason: string | null;
 };
+
+type ResultPopup = {
+  accentColor: string;
+  balance: number;
+  explanation: string;
+  id: number;
+  moneyChange: number;
+  resultType: string;
+  title: string;
+};
+
+const DICE_ANIMATION_DURATION_MS = 960;
+const REDUCED_DICE_ANIMATION_DURATION_MS = 180;
+const DICE_ANIMATION_FRAME_MS = 72;
+const TOKEN_STEP_DURATION_MS = 210;
+const REDUCED_TOKEN_STEP_DURATION_MS = 70;
 
 function getBoardPosition(index: number): CSSProperties {
   if (index < 7) {
@@ -120,6 +138,40 @@ function formatTransitRentTiers(separator = " / ") {
 
 function rollDie() {
   return Math.floor(Math.random() * 6) + 1;
+}
+
+function wait(milliseconds: number) {
+  return new Promise<void>((resolve) => {
+    window.setTimeout(resolve, milliseconds);
+  });
+}
+
+function prefersReducedMotion() {
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+function getWrappedPosition(position: number) {
+  return (
+    ((position % BOARD_SPACE_COUNT) + BOARD_SPACE_COUNT) % BOARD_SPACE_COUNT
+  );
+}
+
+function getClockwiseMovementDistance(
+  startPosition: number,
+  endPosition: number,
+) {
+  return getWrappedPosition(endPosition - startPosition);
+}
+
+function getClockwiseMovementPath(
+  startPosition: number,
+  endPosition: number,
+) {
+  const distance = getClockwiseMovementDistance(startPosition, endPosition);
+
+  return Array.from({ length: distance }, (_, stepIndex) =>
+    getWrappedPosition(startPosition + stepIndex + 1),
+  );
 }
 
 function getSpaceOwner(gameState: OnlineGameState, position: number) {
@@ -531,6 +583,174 @@ function renderDevelopmentMarkers(level: PropertyDevelopmentLevel) {
   );
 }
 
+function getConfirmedRollActor({
+  nextState,
+  previousState,
+}: {
+  nextState: OnlineGameState;
+  previousState: OnlineGameState;
+}) {
+  const previousPlayer = previousState.players[previousState.currentPlayerIndex];
+
+  if (!previousPlayer) {
+    return null;
+  }
+
+  const nextPlayer = nextState.players.find((player) => {
+    return player.id === previousPlayer.id;
+  });
+
+  if (!nextPlayer) {
+    return null;
+  }
+
+  return {
+    nextPlayer,
+    previousPlayer,
+  };
+}
+
+function isConfirmedRollUpdate({
+  nextState,
+  previousState,
+}: {
+  nextState: OnlineGameState;
+  previousState: OnlineGameState;
+}) {
+  return (
+    !previousState.hasRolledThisTurn &&
+    nextState.hasRolledThisTurn &&
+    previousState.lastRoll === null &&
+    nextState.lastRoll !== null
+  );
+}
+
+function createResultPopupFromConfirmedRoll({
+  nextState,
+  previousState,
+}: {
+  nextState: OnlineGameState;
+  previousState: OnlineGameState;
+}): Omit<ResultPopup, "id"> | null {
+  const actor = getConfirmedRollActor({ nextState, previousState });
+
+  if (!actor) {
+    return null;
+  }
+
+  const { nextPlayer, previousPlayer } = actor;
+  const destination = ONLINE_BOARD_SPACES[nextPlayer.position];
+  const normalizedMessage = nextState.message.toLowerCase();
+  const hasPendingPurchase =
+    nextState.pendingPropertyPurchasePosition !== null &&
+    nextState.pendingPropertyPurchasePosition !== undefined;
+  const moneyChange = nextPlayer.balance - previousPlayer.balance;
+  const basePopup = {
+    balance: nextPlayer.balance,
+    explanation: nextState.message,
+    moneyChange,
+  };
+
+  if (nextState.winnerPlayerId) {
+    const winner = nextState.players.find((player) => {
+      return player.id === nextState.winnerPlayerId;
+    });
+
+    return {
+      ...basePopup,
+      accentColor: "#06d6a0",
+      resultType: "Winner",
+      title: winner ? `${winner.name} Wins` : "Winner",
+    };
+  }
+
+  if (nextPlayer.isEliminated && !previousPlayer.isEliminated) {
+    return {
+      ...basePopup,
+      accentColor: "#ef476f",
+      resultType: "Bankruptcy",
+      title: `${nextPlayer.name} Bankrupt`,
+    };
+  }
+
+  if (nextState.lastEventCard) {
+    return {
+      ...basePopup,
+      accentColor: onlineSpaceStyles.event.accent,
+      explanation: `${nextState.lastEventCard.description} ${nextState.lastEventCard.result} ${nextState.message}`,
+      resultType: "Event",
+      title: nextState.lastEventCard.title,
+    };
+  }
+
+  if (normalizedMessage.includes(" rent")) {
+    return {
+      ...basePopup,
+      accentColor: onlineSpaceStyles[destination.type].accent,
+      resultType: "Rent",
+      title: destination.name,
+    };
+  }
+
+  if (
+    isOnlineTaxSpace(destination) ||
+    normalizedMessage.includes(" city tax") ||
+    normalizedMessage.includes(" grid levy")
+  ) {
+    return {
+      ...basePopup,
+      accentColor: onlineSpaceStyles.tax.accent,
+      resultType: "Tax",
+      title: destination.name,
+    };
+  }
+
+  if (
+    destination.type === "detention" ||
+    normalizedMessage.includes("detention")
+  ) {
+    return {
+      ...basePopup,
+      accentColor: onlineSpaceStyles.detention.accent,
+      resultType: "Detention",
+      title: "Civic Detention",
+    };
+  }
+
+  if (destination.type === "rest" || normalizedMessage.includes("rooftop rest")) {
+    return {
+      ...basePopup,
+      accentColor: onlineSpaceStyles.rest.accent,
+      resultType: "Rest Area",
+      title: "Rooftop Rest",
+    };
+  }
+
+  if (normalizedMessage.includes("city launch bonus")) {
+    return {
+      ...basePopup,
+      accentColor: onlineSpaceStyles.start.accent,
+      resultType: "Bonus",
+      title: "Grand Plaza Bonus",
+    };
+  }
+
+  if (hasPendingPurchase) {
+    return null;
+  }
+
+  if (isOnlineBuyableSpace(destination)) {
+    return {
+      ...basePopup,
+      accentColor: onlineSpaceStyles[destination.type].accent,
+      resultType: destination.type === "transit" ? "Transit" : "Property",
+      title: destination.name,
+    };
+  }
+
+  return null;
+}
+
 function getNotFoundMessage(error: { code?: string } | null) {
   return error?.code === "PGRST116"
     ? "This room no longer exists or your saved seat is no longer available."
@@ -588,6 +808,9 @@ function isExpectedTimerExpirationRace(error: unknown) {
 export default function OnlineGamePage() {
   const params = useParams<{ code: string }>();
   const router = useRouter();
+  const animationSequenceRef = useRef(0);
+  const gameRowRef = useRef<OnlineGameStateRow | null>(null);
+  const lastAnimatedVersionRef = useRef<number | null>(null);
   const roomCode = sanitizeRoomCode(params.code ?? "");
   const supabase = useMemo(() => getSupabaseBrowserClient(), []);
   const isConfigured = hasSupabaseConfig();
@@ -599,6 +822,17 @@ export default function OnlineGamePage() {
     useState<StoredOnlineSession | null>(null);
   const [presenceNowMs, setPresenceNowMs] = useState(() => Date.now());
   const [errorMessage, setErrorMessage] = useState("");
+  const [animatedDiceRoll, setAnimatedDiceRoll] =
+    useState<OnlineDiceRoll | null>(null);
+  const [animatedPlayerPositions, setAnimatedPlayerPositions] = useState<
+    Record<string, number>
+  >({});
+  const [highlightedBoardPosition, setHighlightedBoardPosition] = useState<
+    number | null
+  >(null);
+  const [interactionPhase, setInteractionPhase] =
+    useState<InteractionPhase>("idle");
+  const [resultPopup, setResultPopup] = useState<ResultPopup | null>(null);
   const [isLoading, setIsLoading] = useState(isConfigured);
   const [isPropertiesModalOpen, setIsPropertiesModalOpen] = useState(false);
   const [isReconnecting, setIsReconnecting] = useState(false);
@@ -606,6 +840,14 @@ export default function OnlineGamePage() {
   const [isExpiringTurn, setIsExpiringTurn] = useState(false);
 
   const gameState = gameRow?.state ?? null;
+  const isInteractionLocked =
+    isActing ||
+    isExpiringTurn ||
+    interactionPhase !== "idle" ||
+    resultPopup !== null;
+  const displayedDiceRoll =
+    animatedDiceRoll ??
+    (interactionPhase === "rolling" ? null : gameState?.lastRoll);
   const winnerPlayer =
     gameState?.players.find((player) => player.id === gameState.winnerPlayerId) ??
     null;
@@ -666,8 +908,7 @@ export default function OnlineGamePage() {
     !isDetentionTurn &&
     !hasPendingPropertyPurchase &&
     !isTurnTimerExpired &&
-    !isExpiringTurn &&
-    !isActing;
+    !isInteractionLocked;
   const canEndTurn =
     Boolean(room && gameRow && isCurrentPlayer) &&
     !isGameOver &&
@@ -675,16 +916,14 @@ export default function OnlineGamePage() {
     !isDetentionTurn &&
     !hasPendingPropertyPurchase &&
     !isTurnTimerExpired &&
-    !isExpiringTurn &&
-    !isActing;
+    !isInteractionLocked;
   const canLeaveDetention =
     Boolean(room && gameRow && isCurrentPlayer && currentPlayer) &&
     !isGameOver &&
     isDetentionTurn &&
     currentPlayer!.isDetained &&
     !isTurnTimerExpired &&
-    !isExpiringTurn &&
-    !isActing;
+    !isInteractionLocked;
   const canBuySpace =
     Boolean(room && gameRow && isCurrentPlayer && currentPlayer) &&
     !isGameOver &&
@@ -695,8 +934,7 @@ export default function OnlineGamePage() {
     currentPlayer!.position === gameState?.pendingPropertyPurchasePosition &&
     currentPlayer!.balance >= currentBuyableSpace.price &&
     !isTurnTimerExpired &&
-    !isExpiringTurn &&
-    !isActing;
+    !isInteractionLocked;
   const canSkipPurchase =
     Boolean(room && gameRow && isCurrentPlayer && currentPlayer) &&
     !isGameOver &&
@@ -706,10 +944,9 @@ export default function OnlineGamePage() {
     !isDetentionTurn &&
     currentPlayer!.position === gameState?.pendingPropertyPurchasePosition &&
     !isTurnTimerExpired &&
-    !isExpiringTurn &&
-    !isActing;
+    !isInteractionLocked;
   const canPlayAgain =
-    Boolean(room && gameRow && isHost && winnerPlayer) && !isActing;
+    Boolean(room && gameRow && isHost && winnerPlayer) && !isInteractionLocked;
   const ownedPropertyGroups =
     gameState && localPlayer
       ? Object.values(PROPERTY_GROUPS)
@@ -748,6 +985,208 @@ export default function OnlineGamePage() {
     0,
   );
 
+  const animateDiceRoll = useCallback(async (finalRoll: OnlineDiceRoll) => {
+    const reducedMotion = prefersReducedMotion();
+    const duration = reducedMotion
+      ? REDUCED_DICE_ANIMATION_DURATION_MS
+      : DICE_ANIMATION_DURATION_MS;
+    const startedAt = Date.now();
+
+    while (Date.now() - startedAt < duration) {
+      const dieOne = rollDie();
+      const dieTwo = rollDie();
+
+      setAnimatedDiceRoll({ dieOne, dieTwo, total: dieOne + dieTwo });
+      await wait(reducedMotion ? duration : DICE_ANIMATION_FRAME_MS);
+    }
+
+    setAnimatedDiceRoll(finalRoll);
+  }, []);
+
+  const animateTokenMovement = useCallback(
+    async ({
+      endPosition,
+      playerId,
+      sequenceId,
+      startPosition,
+    }: {
+      endPosition: number;
+      playerId: string;
+      sequenceId: number;
+      startPosition: number;
+    }) => {
+      const stepDuration = prefersReducedMotion()
+        ? REDUCED_TOKEN_STEP_DURATION_MS
+        : TOKEN_STEP_DURATION_MS;
+      const movementPath = getClockwiseMovementPath(startPosition, endPosition);
+
+      if (movementPath.length === 0) {
+        setHighlightedBoardPosition(endPosition);
+        await wait(stepDuration);
+        return;
+      }
+
+      for (const position of movementPath) {
+        if (animationSequenceRef.current !== sequenceId) {
+          return;
+        }
+
+        setAnimatedPlayerPositions((currentPositions) => ({
+          ...currentPositions,
+          [playerId]: position,
+        }));
+        setHighlightedBoardPosition(position);
+        await wait(stepDuration);
+      }
+    },
+    [],
+  );
+
+  const animateConfirmedGameUpdate = useCallback(
+    async ({
+      nextRow,
+      previousRow,
+      sequenceId,
+    }: {
+      nextRow: OnlineGameStateRow;
+      previousRow: OnlineGameStateRow;
+      sequenceId: number;
+    }) => {
+      const actor = getConfirmedRollActor({
+        nextState: nextRow.state,
+        previousState: previousRow.state,
+      });
+
+      if (!actor || !nextRow.state.lastRoll) {
+        return;
+      }
+
+      const { nextPlayer, previousPlayer } = actor;
+
+      try {
+        setResultPopup(null);
+        setInteractionPhase("rolling");
+        await animateDiceRoll(nextRow.state.lastRoll);
+
+        if (animationSequenceRef.current !== sequenceId) {
+          return;
+        }
+
+        setInteractionPhase("moving");
+        await animateTokenMovement({
+          endPosition: nextPlayer.position,
+          playerId: nextPlayer.id,
+          sequenceId,
+          startPosition: previousPlayer.position,
+        });
+
+        if (animationSequenceRef.current !== sequenceId) {
+          return;
+        }
+
+        setInteractionPhase("resolving");
+        const nextPopup = createResultPopupFromConfirmedRoll({
+          nextState: nextRow.state,
+          previousState: previousRow.state,
+        });
+
+        if (nextPopup) {
+          setResultPopup({
+            ...nextPopup,
+            id: Date.now(),
+          });
+        }
+      } finally {
+        if (animationSequenceRef.current === sequenceId) {
+          setAnimatedDiceRoll(null);
+          setAnimatedPlayerPositions({});
+          setHighlightedBoardPosition(null);
+          setInteractionPhase("idle");
+        }
+      }
+    },
+    [animateDiceRoll, animateTokenMovement],
+  );
+
+  const applyGameRowUpdate = useCallback(
+    (
+      nextRow: OnlineGameStateRow,
+      options: { animate?: boolean } = {},
+    ) => {
+      const previousRow = gameRowRef.current;
+
+      if (previousRow && nextRow.version < previousRow.version) {
+        return;
+      }
+
+      const shouldAnimate =
+        options.animate !== false &&
+        previousRow !== null &&
+        nextRow.version > previousRow.version &&
+        lastAnimatedVersionRef.current !== nextRow.version &&
+        isConfirmedRollUpdate({
+          nextState: nextRow.state,
+          previousState: previousRow.state,
+        });
+      const actor =
+        shouldAnimate && previousRow
+          ? getConfirmedRollActor({
+              nextState: nextRow.state,
+              previousState: previousRow.state,
+            })
+          : null;
+
+      if (shouldAnimate && actor) {
+        lastAnimatedVersionRef.current = nextRow.version;
+        setAnimatedPlayerPositions({
+          [actor.nextPlayer.id]: actor.previousPlayer.position,
+        });
+        setHighlightedBoardPosition(actor.previousPlayer.position);
+      } else if (
+        previousRow &&
+        nextRow.version > previousRow.version &&
+        (nextRow.state.message.toLowerCase().includes("timer expired") ||
+          nextRow.state.currentPlayerIndex !==
+            previousRow.state.currentPlayerIndex ||
+          nextRow.state.winnerPlayerId !== previousRow.state.winnerPlayerId)
+      ) {
+        animationSequenceRef.current += 1;
+        setAnimatedDiceRoll(null);
+        setAnimatedPlayerPositions({});
+        setHighlightedBoardPosition(null);
+        setInteractionPhase("idle");
+        setResultPopup(null);
+      }
+
+      gameRowRef.current = nextRow;
+      setGameRow(nextRow);
+      setErrorMessage("");
+
+      if (shouldAnimate && actor) {
+        const sequenceId = animationSequenceRef.current + 1;
+        animationSequenceRef.current = sequenceId;
+        void animateConfirmedGameUpdate({
+          nextRow,
+          previousRow: previousRow!,
+          sequenceId,
+        });
+      }
+    },
+    [animateConfirmedGameUpdate],
+  );
+
+  const clearGameRowState = useCallback(() => {
+    animationSequenceRef.current += 1;
+    gameRowRef.current = null;
+    lastAnimatedVersionRef.current = null;
+    setAnimatedDiceRoll(null);
+    setAnimatedPlayerPositions({});
+    setHighlightedBoardPosition(null);
+    setInteractionPhase("idle");
+    setResultPopup(null);
+    setGameRow(null);
+  }, []);
+
   const loadRoom = useCallback(
     async (code: string) => {
       if (!supabase) {
@@ -765,7 +1204,7 @@ export default function OnlineGamePage() {
       if (notFoundMessage) {
         clearOnlineSession(code);
         setRoom(null);
-        setGameRow(null);
+        clearGameRowState();
         throw new Error(notFoundMessage);
       }
 
@@ -782,7 +1221,7 @@ export default function OnlineGamePage() {
       if (loadedRoom.status === "closed") {
         clearOnlineSession(loadedRoom.code);
         setRoom(null);
-        setGameRow(null);
+        clearGameRowState();
         throw new Error("This online room has been closed.");
       }
 
@@ -790,11 +1229,11 @@ export default function OnlineGamePage() {
 
       return loadedRoom;
     },
-    [supabase],
+    [clearGameRowState, supabase],
   );
 
   const loadGameState = useCallback(
-    async (roomId: string) => {
+    async (roomId: string, options: { animate?: boolean } = {}) => {
       if (!supabase) {
         return null;
       }
@@ -821,12 +1260,11 @@ export default function OnlineGamePage() {
         throw new Error("Online game state is invalid. Restart this room.");
       }
 
-      setGameRow(parsedGameState);
-      setErrorMessage("");
+      applyGameRowUpdate(parsedGameState, options);
 
       return parsedGameState;
     },
-    [supabase],
+    [applyGameRowUpdate, supabase],
   );
 
   const loadRoomPlayers = useCallback(
@@ -858,13 +1296,19 @@ export default function OnlineGamePage() {
   );
 
   useEffect(() => {
-    if (!isPropertiesModalOpen) {
+    if (!isPropertiesModalOpen && !resultPopup) {
       return;
     }
 
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") {
-        setIsPropertiesModalOpen(false);
+        if (isPropertiesModalOpen) {
+          setIsPropertiesModalOpen(false);
+        }
+
+        if (resultPopup) {
+          setResultPopup(null);
+        }
       }
     }
 
@@ -873,7 +1317,7 @@ export default function OnlineGamePage() {
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [isPropertiesModalOpen]);
+  }, [isPropertiesModalOpen, resultPopup]);
 
   useEffect(() => {
     if (!supabase || !isConfigured) {
@@ -927,7 +1371,7 @@ export default function OnlineGamePage() {
         }
 
         const [loadedGameState] = await Promise.all([
-          loadGameState(loadedRoom.id),
+          loadGameState(loadedRoom.id, { animate: false }),
           loadRoomPlayers(loadedRoom.id),
         ]);
 
@@ -955,7 +1399,7 @@ export default function OnlineGamePage() {
             clearOnlineSession(roomCode);
             setStoredOnlineSession(null);
             setRoom(null);
-            setGameRow(null);
+            clearGameRowState();
           }
 
           setErrorMessage(getSafeSupabaseErrorMessage(error));
@@ -975,6 +1419,7 @@ export default function OnlineGamePage() {
     };
   }, [
     isConfigured,
+    clearGameRowState,
     loadGameState,
     loadRoom,
     loadRoomPlayers,
@@ -1020,7 +1465,7 @@ export default function OnlineGamePage() {
           clearOnlineSession(activeSession.roomCode);
           setStoredOnlineSession(null);
           setRoom(null);
-          setGameRow(null);
+          clearGameRowState();
           setRoomPlayers([]);
           setErrorMessage(getSafeSupabaseErrorMessage(error));
         }
@@ -1049,7 +1494,7 @@ export default function OnlineGamePage() {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("focus", sendHeartbeat);
     };
-  }, [currentUserId, room, storedOnlineSession, supabase]);
+  }, [clearGameRowState, currentUserId, room, storedOnlineSession, supabase]);
 
   useEffect(() => {
     if (
@@ -1093,8 +1538,7 @@ export default function OnlineGamePage() {
         }
 
         if (isActive) {
-          setGameRow(parsedGameState);
-          setErrorMessage("");
+          applyGameRowUpdate(parsedGameState);
         }
       } catch (error) {
         if (!isActive) {
@@ -1121,6 +1565,7 @@ export default function OnlineGamePage() {
   }, [
     gameRow,
     gameState,
+    applyGameRowUpdate,
     isExpiringTurn,
     isTurnTimerExpired,
     loadGameState,
@@ -1150,7 +1595,7 @@ export default function OnlineGamePage() {
               clearOnlineSession(room.code);
               setStoredOnlineSession(null);
               setRoom(null);
-              setGameRow(null);
+              clearGameRowState();
             }
 
             setErrorMessage(getSafeSupabaseErrorMessage(error));
@@ -1185,7 +1630,7 @@ export default function OnlineGamePage() {
               clearOnlineSession(room.code);
               setStoredOnlineSession(null);
               setRoom(null);
-              setGameRow(null);
+              clearGameRowState();
             }
 
             setErrorMessage(getSafeSupabaseErrorMessage(error));
@@ -1197,7 +1642,7 @@ export default function OnlineGamePage() {
     return () => {
       void supabase.removeChannel(channel);
     };
-  }, [loadGameState, loadRoom, loadRoomPlayers, room, supabase]);
+  }, [clearGameRowState, loadGameState, loadRoom, loadRoomPlayers, room, supabase]);
 
   useEffect(() => {
     if (room && room.status !== "started") {
@@ -1221,6 +1666,9 @@ export default function OnlineGamePage() {
     }
 
     setIsActing(true);
+    setInteractionPhase("rolling");
+    setAnimatedDiceRoll(null);
+    setResultPopup(null);
     setErrorMessage("");
 
     try {
@@ -1243,8 +1691,12 @@ export default function OnlineGamePage() {
         throw new Error("Online game state is invalid after rolling.");
       }
 
-      setGameRow(parsedGameState);
+      applyGameRowUpdate(parsedGameState);
     } catch (error) {
+      animationSequenceRef.current += 1;
+      setAnimatedDiceRoll(null);
+      setHighlightedBoardPosition(null);
+      setInteractionPhase("idle");
       setErrorMessage(getSafeSupabaseErrorMessage(error));
       await loadGameState(room.id).catch(() => undefined);
     } finally {
@@ -1276,7 +1728,7 @@ export default function OnlineGamePage() {
         throw new Error("Online game state is invalid after ending the turn.");
       }
 
-      setGameRow(parsedGameState);
+      applyGameRowUpdate(parsedGameState);
     } catch (error) {
       setErrorMessage(getSafeSupabaseErrorMessage(error));
       await loadGameState(room.id).catch(() => undefined);
@@ -1311,7 +1763,7 @@ export default function OnlineGamePage() {
         );
       }
 
-      setGameRow(parsedGameState);
+      applyGameRowUpdate(parsedGameState);
     } catch (error) {
       setErrorMessage(getSafeSupabaseErrorMessage(error));
       await loadGameState(room.id).catch(() => undefined);
@@ -1353,7 +1805,7 @@ export default function OnlineGamePage() {
         throw new Error("Online game state is invalid after buying.");
       }
 
-      setGameRow(parsedGameState);
+      applyGameRowUpdate(parsedGameState);
     } catch (error) {
       setErrorMessage(getSafeSupabaseErrorMessage(error));
       await loadGameState(room.id).catch(() => undefined);
@@ -1398,7 +1850,7 @@ export default function OnlineGamePage() {
         throw new Error("Online game state is invalid after skipping.");
       }
 
-      setGameRow(parsedGameState);
+      applyGameRowUpdate(parsedGameState);
     } catch (error) {
       setErrorMessage(getSafeSupabaseErrorMessage(error));
       await loadGameState(room.id).catch(() => undefined);
@@ -1420,7 +1872,7 @@ export default function OnlineGamePage() {
 
     const buildStatus = getBuildActionStatus({
       gameState,
-      isActing,
+      isActing: isInteractionLocked,
       isCurrentPlayer,
       isTurnTimerExpired,
       player: localPlayer,
@@ -1455,7 +1907,7 @@ export default function OnlineGamePage() {
         throw new Error("Online game state is invalid after building.");
       }
 
-      setGameRow(parsedGameState);
+      applyGameRowUpdate(parsedGameState);
     } catch (error) {
       setErrorMessage(getSafeSupabaseErrorMessage(error));
       await loadGameState(room.id).catch(() => undefined);
@@ -1477,7 +1929,7 @@ export default function OnlineGamePage() {
 
     const sellStatus = getSellActionStatus({
       gameState,
-      isActing,
+      isActing: isInteractionLocked,
       isCurrentPlayer,
       isTurnTimerExpired,
       player: localPlayer,
@@ -1512,7 +1964,7 @@ export default function OnlineGamePage() {
         throw new Error("Online game state is invalid after selling.");
       }
 
-      setGameRow(parsedGameState);
+      applyGameRowUpdate(parsedGameState);
     } catch (error) {
       setErrorMessage(getSafeSupabaseErrorMessage(error));
       await loadGameState(room.id).catch(() => undefined);
@@ -1558,6 +2010,12 @@ export default function OnlineGamePage() {
     }
   }
 
+  function handleResultBackdropMouseDown(event: MouseEvent<HTMLDivElement>) {
+    if (event.target === event.currentTarget) {
+      setResultPopup(null);
+    }
+  }
+
   function renderPurchasePanel(space: OnlineBuyableSpace) {
     if (!gameState || !currentPlayer) {
       return null;
@@ -1567,99 +2025,73 @@ export default function OnlineGamePage() {
     const propertyGroup = isOnlinePropertySpace(space)
       ? getPropertyGroup(space.groupId)
       : null;
-    const propertyDevelopmentLevel = isOnlinePropertySpace(space)
-      ? getPropertyDevelopmentLevel(gameState, currentPlayer.position)
-      : 0;
-    const propertyRent = isOnlinePropertySpace(space)
-      ? getDevelopedPropertyRent(gameState, currentPlayer.position, space)
-      : 0;
-    const isPendingPurchase =
-      gameState.pendingPropertyPurchasePosition === currentPlayer.position;
-    const owner = currentSpaceOwner;
-    const transitRent =
-      isTransit && owner
-        ? getTransitRent(getOwnedTransitCount(gameState, owner.id))
-        : ONLINE_TRANSIT_RENTS[1];
-    const rentLabel = isTransit ? "Transit Rent" : "Rent";
-    const rentValue = isOnlinePropertySpace(space)
-      ? formatCurrency(propertyRent)
-      : owner
-        ? formatCurrency(transitRent)
-        : formatTransitRentTiers();
+    const baseRent = isOnlinePropertySpace(space)
+      ? space.rent
+      : ONLINE_TRANSIT_RENTS[1];
 
     return (
-      <div className="game-panel game-action-panel game-shadow-blue border-2 border-[#171915] bg-white/90 p-4 shadow-[8px_8px_0_0_#3454d1] backdrop-blur">
-        <h2 className="text-2xl font-black">
-          {isTransit ? "Transit" : "Property"}
-        </h2>
-
-        <div className="mt-4 space-y-3 border-2 border-[#171915] bg-[#f7f8f4] p-3">
-          <div>
+      <div className="fixed inset-0 z-40 flex items-center justify-center bg-[#171915]/55 px-4 py-6 backdrop-blur-sm">
+        <section
+          aria-labelledby="online-purchase-modal-title"
+          aria-modal="true"
+          className="game-popup-enter max-h-[88vh] w-full max-w-lg overflow-y-auto border-2 border-[#171915] bg-white shadow-[12px_12px_0_0_#3454d1]"
+          role="dialog"
+        >
+          <div className="border-b-2 border-[#171915] bg-[#f7f8f4] p-4">
             <p className="text-sm font-black uppercase text-[#596057]">
-              Space
+              Available to buy
             </p>
-            <p className="break-words text-xl font-black">{space.name}</p>
+            <h2
+              className="mt-1 break-words text-3xl font-black leading-none"
+              id="online-purchase-modal-title"
+            >
+              {space.name}
+            </h2>
             {propertyGroup ? (
-              <div className="mt-2 flex items-center gap-2">
+              <div className="mt-3 flex items-center gap-3">
                 <span
                   aria-hidden="true"
-                  className="h-4 w-12 border-2 border-[#171915]"
+                  className="h-5 w-16 border-2 border-[#171915]"
                   style={{ backgroundColor: propertyGroup.color }}
                 />
-                <span className="text-xs font-black uppercase text-[#445045]">
+                <span className="text-sm font-black uppercase text-[#445045]">
                   {propertyGroup.name}
                 </span>
               </div>
             ) : null}
           </div>
 
-          <div className="grid grid-cols-3 gap-3">
-            <div>
-              <p className="text-xs font-black uppercase text-[#596057]">
-                Price
-              </p>
-              <p className="text-lg font-black">
-                {formatCurrency(space.price)}
-              </p>
+          <div className="space-y-4 p-4">
+            <div className="grid grid-cols-2 gap-3">
+              <div className="border-2 border-[#171915] bg-[#f7f8f4] p-3">
+                <p className="text-xs font-black uppercase text-[#596057]">
+                  Price
+                </p>
+                <p className="text-xl font-black">
+                  {formatCurrency(space.price)}
+                </p>
+              </div>
+              <div className="border-2 border-[#171915] bg-[#f7f8f4] p-3">
+                <p className="text-xs font-black uppercase text-[#596057]">
+                  Base Rent
+                </p>
+                <p className="text-xl font-black">
+                  {formatCurrency(baseRent)}
+                </p>
+              </div>
+              <div className="col-span-2 border-2 border-[#171915] bg-[#f7f8f4] p-3">
+                <p className="text-xs font-black uppercase text-[#596057]">
+                  Current Balance
+                </p>
+                <p className="text-xl font-black">
+                  {formatCurrency(currentPlayer.balance)}
+                </p>
+              </div>
             </div>
-            <div>
-              <p className="text-xs font-black uppercase text-[#596057]">
-                {rentLabel}
-              </p>
-              <p className="text-lg font-black">{rentValue}</p>
-            </div>
-            <div>
-              <p className="text-xs font-black uppercase text-[#596057]">
-                Balance
-              </p>
-              <p className="text-lg font-black">
-                {formatCurrency(currentPlayer.balance)}
-              </p>
-            </div>
-          </div>
 
-          {owner ? (
-            <p className="border-2 border-[#171915] bg-white p-3 text-sm font-bold leading-6 text-[#445045]">
-              {owner.id === currentPlayer.id
-                ? isOnlinePropertySpace(space)
-                  ? `${currentPlayer.name} already owns ${space.name} with ${getDevelopmentLabel(
-                      propertyDevelopmentLevel,
-                    )}.`
-                  : `${currentPlayer.name} already owns ${space.name}.`
-                : isTransit
-                  ? `${space.name} is owned by ${owner.name}. ${currentPlayer.name} paid ${formatCurrency(
-                      transitRent,
-                    )} transit rent.`
-                  : `${space.name} is owned by ${owner.name}. ${currentPlayer.name} paid ${formatCurrency(
-                      propertyRent,
-                    )} rent with ${getDevelopmentLabel(
-                      propertyDevelopmentLevel,
-                    )}.`}
-            </p>
-          ) : isPendingPurchase ? (
-            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
+            <div className="grid gap-3 sm:grid-cols-2">
               <button
-                className="h-12 border-2 border-[#171915] bg-[#06d6a0] px-4 text-sm font-bold text-[#171915] shadow-[5px_5px_0_0_#171915] transition-transform hover:-translate-y-0.5 focus:outline-none focus:ring-4 focus:ring-[#06d6a0]/35 disabled:cursor-not-allowed disabled:bg-[#c6cbbf] disabled:text-[#596057] disabled:shadow-none"
+                className="min-h-12 border-2 border-[#171915] bg-[#06d6a0] px-4 py-3 text-sm font-black text-[#171915] shadow-[5px_5px_0_0_#171915] transition-transform hover:-translate-y-0.5 focus:outline-none focus:ring-4 focus:ring-[#06d6a0]/35 disabled:cursor-not-allowed disabled:bg-[#c6cbbf] disabled:text-[#596057] disabled:shadow-none"
                 disabled={!canBuySpace}
                 onClick={buySpace}
                 type="button"
@@ -1672,7 +2104,7 @@ export default function OnlineGamePage() {
               </button>
 
               <button
-                className="h-12 border-2 border-[#171915] bg-[#f7f8f4] px-4 text-sm font-bold text-[#171915] shadow-[5px_5px_0_0_#ef476f] transition-transform hover:-translate-y-0.5 focus:outline-none focus:ring-4 focus:ring-[#ef476f]/35 disabled:cursor-not-allowed disabled:bg-[#c6cbbf] disabled:text-[#596057] disabled:shadow-none"
+                className="min-h-12 border-2 border-[#171915] bg-white px-4 py-3 text-sm font-black text-[#171915] shadow-[5px_5px_0_0_#ef476f] transition-transform hover:-translate-y-0.5 focus:outline-none focus:ring-4 focus:ring-[#ef476f]/35 disabled:cursor-not-allowed disabled:bg-[#c6cbbf] disabled:text-[#596057] disabled:shadow-none"
                 disabled={!canSkipPurchase}
                 onClick={skipPurchase}
                 type="button"
@@ -1680,12 +2112,8 @@ export default function OnlineGamePage() {
                 {isActing ? "Skipping..." : "Skip Purchase"}
               </button>
             </div>
-          ) : (
-            <p className="border-2 border-[#171915] bg-white p-3 text-sm font-bold leading-6 text-[#445045]">
-              No owner yet. Purchase skipped for this turn.
-            </p>
-          )}
-        </div>
+          </div>
+        </section>
       </div>
     );
   }
@@ -1866,13 +2294,23 @@ export default function OnlineGamePage() {
                         )
                       : ONLINE_TRANSIT_RENTS[1];
                   const playersOnSpace = gameState.players.filter(
-                    (player) =>
-                      !player.isEliminated && player.position === index,
+                    (player) => {
+                      const displayedPosition =
+                        animatedPlayerPositions[player.id] ?? player.position;
+
+                      return (
+                        !player.isEliminated && displayedPosition === index
+                      );
+                    },
                   );
+                  const isAnimatedStep =
+                    highlightedBoardPosition === index;
 
                   return (
                     <div
-                      className="game-board-space relative flex min-h-0 flex-col justify-between border border-[#171915] p-1.5 text-[#171915]"
+                      className={`game-board-space relative flex min-h-0 flex-col justify-between border border-[#171915] p-1.5 text-[#171915] ${
+                        isAnimatedStep ? "game-board-space-active-step" : ""
+                      }`}
                       key={space.name}
                       style={{
                         ...getBoardPosition(index),
@@ -2043,14 +2481,26 @@ export default function OnlineGamePage() {
             <h2 className="game-panel-title text-2xl font-black">Dice</h2>
 
             <div className="game-dice-grid mt-4 grid grid-cols-3 gap-3">
-              <div className="game-dice-cell flex aspect-square items-center justify-center border-2 border-[#171915] bg-[#f7f8f4] text-3xl font-black">
-                {gameState?.lastRoll?.dieOne ?? "-"}
+              <div
+                className={`game-dice-cell flex aspect-square items-center justify-center border-2 border-[#171915] bg-[#f7f8f4] text-3xl font-black ${
+                  interactionPhase === "rolling" ? "game-dice-tumbling" : ""
+                }`}
+              >
+                {displayedDiceRoll?.dieOne ?? "-"}
               </div>
-              <div className="game-dice-cell flex aspect-square items-center justify-center border-2 border-[#171915] bg-[#f7f8f4] text-3xl font-black">
-                {gameState?.lastRoll?.dieTwo ?? "-"}
+              <div
+                className={`game-dice-cell flex aspect-square items-center justify-center border-2 border-[#171915] bg-[#f7f8f4] text-3xl font-black ${
+                  interactionPhase === "rolling" ? "game-dice-tumbling" : ""
+                }`}
+              >
+                {displayedDiceRoll?.dieTwo ?? "-"}
               </div>
-              <div className="game-dice-cell flex aspect-square items-center justify-center border-2 border-[#171915] bg-[#171915] text-3xl font-black text-white">
-                {gameState?.lastRoll?.total ?? "-"}
+              <div
+                className={`game-dice-cell flex aspect-square items-center justify-center border-2 border-[#171915] bg-[#171915] text-3xl font-black text-white ${
+                  interactionPhase === "rolling" ? "game-dice-tumbling" : ""
+                }`}
+              >
+                {displayedDiceRoll?.total ?? "-"}
               </div>
             </div>
 
@@ -2058,43 +2508,6 @@ export default function OnlineGamePage() {
               {errorMessage || gameState?.message || "Loading online turn"}
             </p>
           </div>
-
-          {gameState?.hasRolledThisTurn &&
-          !isGameOver &&
-          currentBuyableSpace &&
-          !gameState.lastEventCard
-            ? renderPurchasePanel(currentBuyableSpace)
-            : null}
-
-          {gameState?.lastEventCard ? (
-            <div className="game-panel game-action-panel game-shadow-orange border-2 border-[#171915] bg-white/90 p-4 shadow-[8px_8px_0_0_#f8961e] backdrop-blur">
-              <h2 className="text-2xl font-black">Event</h2>
-
-              <div className="mt-4 space-y-3 border-2 border-[#171915] bg-[#fff1de] p-3">
-                <div>
-                  <p className="text-sm font-black uppercase text-[#596057]">
-                    Card
-                  </p>
-                  <p className="break-words text-xl font-black">
-                    {gameState.lastEventCard.title}
-                  </p>
-                </div>
-
-                <p className="border-2 border-[#171915] bg-white p-3 text-sm font-bold leading-6 text-[#445045]">
-                  {gameState.lastEventCard.description}
-                </p>
-
-                <div>
-                  <p className="text-xs font-black uppercase text-[#596057]">
-                    Result
-                  </p>
-                  <p className="mt-1 border-2 border-[#171915] bg-white p-3 text-sm font-bold leading-6 text-[#445045]">
-                    {gameState.lastEventCard.result}
-                  </p>
-                </div>
-              </div>
-            </div>
-          ) : null}
 
           <div className="game-panel game-turn-panel game-shadow-cyan border-2 border-[#171915] bg-white/90 p-4 shadow-[8px_8px_0_0_#118ab2] backdrop-blur">
             <h2 className="game-panel-title text-2xl font-black">Turn</h2>
@@ -2186,7 +2599,8 @@ export default function OnlineGamePage() {
               onClick={rollDice}
               type="button"
             >
-              {isActing && !gameState?.hasRolledThisTurn
+              {interactionPhase === "rolling" ||
+              (isActing && !gameState?.hasRolledThisTurn)
                 ? "Rolling..."
                 : "Roll Dice"}
             </button>
@@ -2215,7 +2629,7 @@ export default function OnlineGamePage() {
 
             <button
               className="flex h-14 items-center justify-center gap-2 border-2 border-[#171915] bg-white px-4 text-base font-bold text-[#171915] shadow-[8px_8px_0_0_#171915] transition-transform hover:-translate-y-0.5 focus:outline-none focus:ring-4 focus:ring-[#06d6a0]/35 disabled:cursor-not-allowed disabled:bg-[#c6cbbf] disabled:text-[#596057] disabled:opacity-70 disabled:shadow-none"
-              disabled={!gameState || !localPlayer || isActing}
+              disabled={!gameState || !localPlayer || isInteractionLocked}
               onClick={() => setIsPropertiesModalOpen(true)}
               type="button"
             >
@@ -2241,7 +2655,8 @@ export default function OnlineGamePage() {
             </button>
 
             <button
-              className="h-14 border-2 border-[#171915] bg-[#ef476f] px-6 text-base font-bold text-white shadow-[8px_8px_0_0_#171915] transition-transform hover:-translate-y-0.5 focus:outline-none focus:ring-4 focus:ring-[#ef476f]/35"
+              className="h-14 border-2 border-[#171915] bg-[#ef476f] px-6 text-base font-bold text-white shadow-[8px_8px_0_0_#171915] transition-transform hover:-translate-y-0.5 focus:outline-none focus:ring-4 focus:ring-[#ef476f]/35 disabled:cursor-not-allowed disabled:bg-[#c6cbbf] disabled:text-[#596057] disabled:opacity-70 disabled:shadow-none"
+              disabled={isInteractionLocked}
               onClick={exitGame}
               type="button"
             >
@@ -2263,6 +2678,106 @@ export default function OnlineGamePage() {
           ) : null}
         </aside>
       </section>
+
+      {gameState?.hasRolledThisTurn &&
+      !isGameOver &&
+      currentBuyableSpace &&
+      hasPendingPropertyPurchase &&
+      currentSpaceOwner === null &&
+      interactionPhase === "idle" &&
+      !resultPopup
+        ? renderPurchasePanel(currentBuyableSpace)
+        : null}
+
+      {resultPopup ? (
+        <div
+          className="fixed inset-0 z-40 flex items-center justify-center bg-[#f7f8f4]/55 px-4 py-6 backdrop-blur-[1px]"
+          onMouseDown={handleResultBackdropMouseDown}
+        >
+          <section
+            aria-labelledby="online-landing-result-title"
+            aria-modal="true"
+            className="game-result-popup flex max-h-[90vh] w-full max-w-3xl flex-col border-2 border-[#171915] bg-white shadow-[12px_12px_0_0_#171915]"
+            key={resultPopup.id}
+            role="dialog"
+          >
+            <span
+              aria-hidden="true"
+              className="block h-2 border-b-2 border-[#171915]"
+              style={{ backgroundColor: resultPopup.accentColor }}
+            />
+            <div className="flex items-start justify-between gap-4 border-b-2 border-[#171915] bg-[#f7f8f4] p-5">
+              <div className="min-w-0">
+                <p className="text-sm font-black uppercase text-[#596057]">
+                  {resultPopup.resultType}
+                </p>
+                <h2
+                  className="mt-1 break-words text-3xl font-black leading-none"
+                  id="online-landing-result-title"
+                >
+                  {resultPopup.title}
+                </h2>
+              </div>
+
+              <button
+                className="h-11 shrink-0 border-2 border-[#171915] bg-white px-4 text-sm font-black text-[#171915] shadow-[4px_4px_0_0_#171915] transition-transform hover:-translate-y-0.5 focus:outline-none focus:ring-4 focus:ring-[#ef476f]/35"
+                onClick={() => setResultPopup(null)}
+                type="button"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="game-result-popup-body flex-1 overflow-y-auto p-5">
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="border-2 border-[#171915] bg-[#f7f8f4] p-3">
+                  <p className="text-xs font-black uppercase text-[#596057]">
+                    Money Gained/Paid
+                  </p>
+                  <p
+                    className={`text-xl font-black ${
+                      resultPopup.moneyChange < 0
+                        ? "text-[#ef476f]"
+                        : resultPopup.moneyChange > 0
+                          ? "text-[#047857]"
+                          : "text-[#445045]"
+                    }`}
+                  >
+                    {resultPopup.moneyChange > 0 ? "+" : ""}
+                    {formatCurrency(resultPopup.moneyChange)}
+                  </p>
+                </div>
+
+                <div className="border-2 border-[#171915] bg-[#f7f8f4] p-3">
+                  <p className="text-xs font-black uppercase text-[#596057]">
+                    Updated Balance
+                  </p>
+                  <p className="text-xl font-black">
+                    {formatCurrency(resultPopup.balance)}
+                  </p>
+                </div>
+              </div>
+
+              <div className="mt-4 border-2 border-[#171915] bg-white p-5">
+                <p className="text-xs font-black uppercase text-[#596057]">
+                  What Happened
+                </p>
+                <p className="mt-2 text-lg font-bold leading-8 text-[#445045]">
+                  {resultPopup.explanation}
+                </p>
+              </div>
+
+              <button
+                className="mt-4 min-h-12 w-full border-2 border-[#171915] bg-[#06d6a0] px-4 py-3 text-base font-black text-[#171915] shadow-[5px_5px_0_0_#171915] transition-transform hover:-translate-y-0.5 focus:outline-none focus:ring-4 focus:ring-[#06d6a0]/35"
+                onClick={() => setResultPopup(null)}
+                type="button"
+              >
+                Continue
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
 
       {isPropertiesModalOpen && gameState && localPlayer ? (
         <div
@@ -2350,7 +2865,7 @@ export default function OnlineGamePage() {
                                 : getPropertyRent(position, nextLevel);
                             const buildStatus = getBuildActionStatus({
                               gameState,
-                              isActing,
+                              isActing: isInteractionLocked,
                               isCurrentPlayer,
                               isTurnTimerExpired,
                               player: localPlayer,
@@ -2359,7 +2874,7 @@ export default function OnlineGamePage() {
                             });
                             const sellStatus = getSellActionStatus({
                               gameState,
-                              isActing,
+                              isActing: isInteractionLocked,
                               isCurrentPlayer,
                               isTurnTimerExpired,
                               player: localPlayer,
