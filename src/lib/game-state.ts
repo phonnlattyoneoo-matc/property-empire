@@ -1,3 +1,9 @@
+import {
+  HOTEL_DEVELOPMENT_LEVEL,
+  getPropertyDevelopmentConfig,
+  type PropertyDevelopmentLevel,
+} from "@/lib/property-development";
+
 export const MIN_PLAYERS = 2;
 export const MAX_PLAYERS = 4;
 export const BOARD_SPACE_COUNT = 24;
@@ -24,6 +30,7 @@ export type DiceRoll = {
 };
 
 export type PropertyOwners = Record<string, string>;
+export type PropertyDevelopments = Record<string, PropertyDevelopmentLevel>;
 
 export type ResolvedEventCard = {
   title: string;
@@ -39,6 +46,7 @@ export type GameState = {
   hasRolledThisTurn: boolean;
   isDetentionTurn: boolean;
   pendingPropertyPurchasePosition: number | null;
+  propertyDevelopments: PropertyDevelopments;
   propertyOwners: PropertyOwners;
   message: string;
   winnerPlayerId: string | null;
@@ -53,6 +61,7 @@ export function createGameState(playerNames: string[]): GameState {
     lastRoll: null,
     message: `${playerNames[0]} starts at Grand Plaza.`,
     pendingPropertyPurchasePosition: null,
+    propertyDevelopments: {},
     players: playerNames.map((playerName, index) => ({
       balance: STARTING_BALANCE,
       color: PLAYER_TOKEN_COLORS[index],
@@ -152,12 +161,17 @@ export function parseStoredGameState(rawGameState: string | null): GameState | n
       parsedData.propertyOwners,
       parsedPlayers,
     );
+    const parsedPropertyDevelopments = parsePropertyDevelopments(
+      parsedData.propertyDevelopments,
+      parsedPropertyOwners,
+    );
     const pendingPropertyPurchasePosition = parsePendingPropertyPurchasePosition(
       parsedData.pendingPropertyPurchasePosition,
     );
 
     if (
       !parsedPropertyOwners ||
+      !parsedPropertyDevelopments ||
       pendingPropertyPurchasePosition === undefined
     ) {
       return null;
@@ -208,6 +222,7 @@ export function parseStoredGameState(rawGameState: string | null): GameState | n
       message,
       pendingPropertyPurchasePosition,
       players: parsedPlayers,
+      propertyDevelopments: parsedPropertyDevelopments,
       propertyOwners: parsedPropertyOwners,
       winnerPlayerId,
     };
@@ -285,6 +300,52 @@ function parsePropertyOwners(
   }
 
   return parsedPropertyOwners;
+}
+
+function parsePropertyDevelopments(
+  propertyDevelopments: unknown,
+  propertyOwners: PropertyOwners | null,
+): PropertyDevelopments | null {
+  if (!propertyOwners) {
+    return null;
+  }
+
+  if (propertyDevelopments === undefined) {
+    return {};
+  }
+
+  if (!isRecord(propertyDevelopments)) {
+    return null;
+  }
+
+  const parsedPropertyDevelopments: PropertyDevelopments = {};
+
+  for (const [position, developmentLevel] of Object.entries(
+    propertyDevelopments,
+  )) {
+    const numericPosition = Number(position);
+
+    if (
+      !Number.isInteger(numericPosition) ||
+      numericPosition < 0 ||
+      numericPosition >= BOARD_SPACE_COUNT ||
+      !getPropertyDevelopmentConfig(numericPosition) ||
+      propertyOwners[position] === undefined ||
+      typeof developmentLevel !== "number" ||
+      !Number.isInteger(developmentLevel) ||
+      developmentLevel < 0 ||
+      developmentLevel > HOTEL_DEVELOPMENT_LEVEL
+    ) {
+      return null;
+    }
+
+    if (developmentLevel > 0) {
+      parsedPropertyDevelopments[position] =
+        developmentLevel as PropertyDevelopmentLevel;
+    }
+  }
+
+  return parsedPropertyDevelopments;
 }
 
 function parseWinnerPlayerId(
